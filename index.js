@@ -7,23 +7,13 @@ const BOT_TOKEN = process.env.BOT_TOKEN;
 const MOYK_API_KEY = process.env.MOYK_API_KEY;
 
 // =======================
-// Проверка сервера
-// =======================
-app.get("/", (req, res) => {
-  res.send("Bot is working 🚀");
-});
-
-// =======================
 // Telegram sendMessage
 // =======================
 async function sendMessage(chatId, text) {
   await fetch(`https://api.telegram.org/bot${BOT_TOKEN}/sendMessage`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({
-      chat_id: chatId,
-      text
-    })
+    body: JSON.stringify({ chat_id: chatId, text })
   });
 }
 
@@ -35,18 +25,12 @@ async function getToken() {
     "https://api.moyklass.com/v1/company/auth/getToken",
     {
       method: "POST",
-      headers: {
-        "Content-Type": "application/json"
-      },
-      body: JSON.stringify({
-        apiKey: MOYK_API_KEY
-      })
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ apiKey: MOYK_API_KEY })
     }
   );
-
   const data = await res.json();
   console.log("TOKEN:", data);
-
   return data.accessToken;
 }
 
@@ -65,11 +49,7 @@ async function findUserByPhone(phone) {
 
   const res = await fetch(
     `https://api.moyklass.com/v1/company/users?phone=${phone}`,
-    {
-      headers: {
-        "x-access-token": token
-      }
-    }
+    { headers: { "x-access-token": token } }
   );
 
   const data = await res.json();
@@ -83,9 +63,28 @@ async function findUserByPhone(phone) {
 // =======================
 function formatDate(dateString) {
   if (!dateString) return "не указана";
-
   const date = new Date(dateString);
   return date.toLocaleDateString("ru-RU");
+}
+
+// =======================
+// Формат joins
+// =======================
+function formatJoins(joins) {
+  if (!joins || joins.length === 0) return "Нет занятий";
+
+  return joins.map((j, idx) => {
+    const s = j.stats || {};
+    return `\n📌 Занятие ${idx + 1}:
+- Статус: ${j.status || "-"}
+- Дата следующей записи: ${formatDate(s.nextRecord)}
+- Последнее посещение: ${formatDate(s.lastVisit)}
+- Всего посещений: ${s.visits ?? 0}
+- Бесплатные посещения: ${s.freeVisits ?? 0}
+- Потеряно занятий: ${s.lessonsLost ?? 0}
+- Оплачено всего: ${s.totalPayed ?? 0}
+- Неоплаченные занятия: ${s.nonPayedLessons ?? 0}`;
+  }).join("\n");
 }
 
 // =======================
@@ -96,7 +95,6 @@ app.post(`/bot${BOT_TOKEN}`, async (req, res) => {
   console.log("Сообщение:", body);
 
   res.sendStatus(200);
-
   if (!body.message) return;
 
   const chatId = body.message.chat.id;
@@ -108,9 +106,7 @@ app.post(`/bot${BOT_TOKEN}`, async (req, res) => {
     return;
   }
 
-  // считаем что пользователь отправил телефон
   const phone = normalizePhone(text);
-
   const user = await findUserByPhone(phone);
 
   if (!user) {
@@ -118,14 +114,14 @@ app.post(`/bot${BOT_TOKEN}`, async (req, res) => {
     return;
   }
 
-  // дата начала обучения
   const startDate = formatDate(user.createdAt);
+  const joinsInfo = formatJoins(user.joins);
 
   await sendMessage(
     chatId,
     `✅ Найден: ${user.name}
-📊 Статус: ${user.clientStateId}
-📅 Начало обучения: ${startDate}`
+📅 Начало обучения: ${startDate}
+${joinsInfo}`
   );
 });
 
