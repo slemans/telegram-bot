@@ -10,10 +10,26 @@ app.get("/", (req, res) => {
   res.send("Bot is working 🚀");
 });
 
-// webhook endpoint для Telegram
-app.post(`/bot${BOT_TOKEN}`, (req, res) => {
-  console.log("Получено сообщение от Telegram:", req.body);
-  res.sendStatus(200);
+app.post(`/bot${BOT_TOKEN}`, async (req, res) => {
+  const body = req.body;
+  console.log("Получено сообщение от Telegram:", body);
+
+  res.sendStatus(200); // обязательно
+
+  if (body.message) {
+    const chatId = body.message.chat.id;
+    const text = body.message.text;
+
+    // отправка ответа пользователю
+    await fetch(`https://api.telegram.org/bot${BOT_TOKEN}/sendMessage`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        chat_id: chatId,
+        text: `Привет, ${body.message.from.first_name}! Ты написал: ${text}`
+      })
+    });
+  }
 });
 
 const PORT = process.env.PORT || 3000;
