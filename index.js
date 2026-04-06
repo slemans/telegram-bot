@@ -63,10 +63,10 @@ async function sendMessage(chatId, text) {
 // =======================
 async function getLessons() {
   try {
-    const response = await fetch("https://api.moyklass.com/lessons", {
+    const response = await fetch("https://api.moyklass.com/v1/company/lessons", {
       method: "GET",
       headers: {
-        "Authorization": `Bearer ${MOYK_API_KEY}`,
+        "x-access-token": MOYK_API_KEY,
         "Content-Type": "application/json"
       }
     });
@@ -76,7 +76,8 @@ async function getLessons() {
     const data = await response.json();
     console.log("Moyklass data:", data);
 
-    return data;
+    // иногда данные внутри data.result
+    return data.result || data;
   } catch (err) {
     console.error("Ошибка Moyklass:", err);
     return [];
