@@ -54,15 +54,14 @@ async function getLessons() {
       }
     });
 
-    if (!response.ok) {
-      console.error("Ошибка API Moyklass:", response.status);
-      return [];
-    }
+    console.log("Moyklass status:", response.status);
 
     const data = await response.json();
-    return data; // список уроков или абонементов
+    console.log("Moyklass data:", data);
+
+    return data;
   } catch (err) {
-    console.error("Ошибка запроса к Moyklass:", err);
+    console.error("Ошибка Moyklass:", err);
     return [];
   }
 }
@@ -85,7 +84,7 @@ async function checkExpiringSubscriptions() {
 
       if (chatId) {
         sendNotificationToUser(chatId, `⚠️ Ваш абонемент заканчивается через ${diffDays} дней!`);
-      }
+      } 
     }
   });
 }
@@ -111,6 +110,22 @@ cron.schedule("0 10 * * *", () => {
   console.log("Проверяем абонементы...");
   checkExpiringSubscriptions();
 });
+
+// проверим cron
+cron.schedule("*/1 * * * *", () => {
+  console.log("CRON работает 🚀");
+  checkExpiringSubscriptions();
+});
+
+async function checkExpiringSubscriptions() {
+  const lessons = await getLessons();
+
+  console.log("Получили lessons:", lessons);
+
+  lessons.forEach(lesson => {
+    console.log("Lesson:", lesson);
+  });
+}
 
 const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => console.log("Server started on port", PORT));
