@@ -27,21 +27,32 @@ app.get("/", (req, res) => {
 // =======================
 app.post(`/bot${BOT_TOKEN}`, async (req, res) => {
   const body = req.body;
-  console.log("Получено сообщение от Telegram:", body);
+  console.log("Получено сообщение:", body);
 
   res.sendStatus(200);
 
-  if (body.message) {
-    const chatId = body.message.chat.id;
-    const text = body.message.text;
-    const firstName = body.message.from.first_name || "";
+  if (!body.message) return;
 
-    // сохраняем пользователя (пока без clientId)
-    users.set(chatId, null);
+  const chatId = body.message.chat.id;
+  const text = body.message.text?.trim();
+  const firstName = body.message.from.first_name || "";
 
-    // ответ
-    await sendMessage(chatId, `Привет, ${firstName}! Ты написал: ${text}`);
+  // /start
+  if (text === "/start") {
+    await sendMessage(
+      chatId,
+      `Привет, ${firstName}! 👋\n\nВведите ваш номер телефона (например: 375291234567)`
+    );
+    return;
   }
+
+  // если ввели телефон
+  if (/^\d{10,15}$/.test(text)) {
+    await handlePhone(chatId, text);
+    return;
+  }
+
+  await sendMessage(chatId, "❌ Введите корректный номер телефона");
 });
 
 // =======================
@@ -59,77 +70,146 @@ async function sendMessage(chatId, text) {
 }
 
 // =======================
-// Moyklass API
+// Moyklass TOKEN
 // =======================
-async function getLessons() {
+async function getMoyklassToken() {
   try {
-    const response = await fetch("https://api.moyklass.com/v1/company/lessons", {
+    const response = await fetch("https://api.moyklass.com/v1/company/auth/getToken", {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json"
+      },
+      body: JSON.stringify({
+        apiKey: MOYK_API_KEY
+      })
+    });
+
+    const data = await response.json();
+    console.log("TOKEN:", data);
+
+    return data.accessToken;
+  } catch (err) {
+    console.error("Ошибка токена:", err);
+    return null;
+  }
+}
+
+// =======================
+// Найти клиента по телефону
+// =======================
+async function findClientByPhone(phone) {
+  const token = await getMoyklassToken();
+  if (!token) return null;
+
+  try {
+    const response = await fetch(`https://api.moyklass.com/v1/company/clients?phone=${phone}`, {
       method: "GET",
       headers: {
-        "x-access-token": MOYK_API_KEY,
+        "Authorization": `Bearer ${token}`,
         "Content-Type": "application/json"
       }
     });
 
-    console.log("Moyklass status:", response.status);
+    const data = await response.json();
+    console.log("CLIENTS:", data);
+
+    return data.result?.[0] || null;
+  } catch (err) {
+    console.error("Ошибка поиска клиента:", err);
+    return null;
+  }
+}
+
+// =======================
+// Получить абонементы
+// =======================
+async function getSubscriptions(clientId) {
+  const token = await getMoyklassToken();
+  if (!token) return [];
+
+  try {
+    const response = await fetch(
+      `https://api.moyklass.com/v1/company/subscriptions?clientId=${clientId}`,
+      {
+        method: "GET",
+        headers: {
+          "Authorization": `Bearer ${token}`,
+          "Content-Type": "application/json"
+        }
+      }
+    );
 
     const data = await response.json();
-    console.log("Moyklass data:", data);
+    console.log("SUBSCRIPTIONS:", data);
 
-    // иногда данные внутри data.result
-    return data.result || data;
+    return data.result || [];
   } catch (err) {
-    console.error("Ошибка Moyklass:", err);
+    console.error("Ошибка абонементов:", err);
     return [];
   }
 }
 
 // =======================
-// Проверка абонементов
+// Обработка телефона
 // =======================
-async function checkExpiringSubscriptions() {
-  const lessons = await getLessons();
+async function handlePhone(chatId, phone) {
+  await sendMessage(chatId, "🔍 Ищем вас в системе...");
 
-  console.log("Получили lessons:", lessons);
+  const client = await findClientByPhone(phone);
 
-  lessons.forEach(lesson => {
-    console.log("Lesson:", lesson);
+  if (!client) {
+    await sendMessage(chatId, "❌ Клиент не найден. Проверьте номер телефона.");
+    return;
+  }
 
-    if (!lesson.subscriptionEndDate) return;
+  // сохраняем связь
+  users.set(chatId, client.id);
 
-    const endDate = new Date(lesson.subscriptionEndDate);
-    const now = new Date();
-    const diffDays = Math.ceil((endDate - now) / (1000 * 60 * 60 * 24));
+  await sendMessage(chatId, `✅ Найден: ${client.name}`);
 
-    if (diffDays <= 3) {
-      const chatId = Array.from(users.entries())
-        .find(([chat, clientId]) => clientId === lesson.clientId)?.[0];
+  const subscriptions = await getSubscriptions(client.id);
 
-      if (chatId) {
-        sendMessage(
-          chatId,
-          `⚠️ Ваш абонемент заканчивается через ${diffDays} дней!`
-        );
-      }
-    }
+  if (!subscriptions.length) {
+    await sendMessage(chatId, "У вас нет активных абонементов");
+    return;
+  }
+
+  let message = "📊 Ваши абонементы:\n\n";
+
+  subscriptions.forEach(sub => {
+    message += `• ${sub.name}\n`;
+    message += `Осталось занятий: ${sub.balance}\n`;
+    message += `Действует до: ${sub.endDate}\n\n`;
   });
+
+  await sendMessage(chatId, message);
 }
 
 // =======================
-// CRON
+// CRON (уведомления)
 // =======================
+cron.schedule("0 10 * * *", async () => {
+  console.log("Проверка абонементов...");
 
-// тест — каждую минуту
-cron.schedule("*/1 * * * *", () => {
-  console.log("CRON работает 🚀");
-  checkExpiringSubscriptions();
+  for (const [chatId, clientId] of users.entries()) {
+    if (!clientId) continue;
+
+    const subs = await getSubscriptions(clientId);
+
+    subs.forEach(sub => {
+      const endDate = new Date(sub.endDate);
+      const now = new Date();
+      const diffDays = Math.ceil((endDate - now) / (1000 * 60 * 60 * 24));
+
+      if (diffDays <= 3) {
+        sendMessage(
+          chatId,
+          `⚠️ Абонемент "${sub.name}" заканчивается через ${diffDays} дней!`
+        );
+      }
+    });
+  }
 });
-
-// прод — раз в день в 10:00
-// cron.schedule("0 10 * * *", () => {
-//   console.log("Проверяем абонементы...");
-//   checkExpiringSubscriptions();
-// });
 
 // =======================
 // Запуск сервера
