@@ -1,5 +1,4 @@
 import express from "express";
-import fetch from "node-fetch";
 
 const app = express();
 app.use(express.json());
@@ -29,7 +28,7 @@ app.post(`/bot${BOT_TOKEN}`, async (req, res) => {
     // сохраняем пользователя
     users.add(chatId);
 
-    // отправляем ответ пользователю
+    // отправка ответа пользователю
     await fetch(`https://api.telegram.org/bot${BOT_TOKEN}/sendMessage`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
@@ -54,9 +53,6 @@ async function sendNotification(message) {
     });
   }
 }
-
-// пример использования: уведомление о конце абонемента
-// sendNotification("Внимание! Ваш абонемент заканчивается завтра! 🚀");
 
 const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => console.log("Server started on port", PORT));
