@@ -10,9 +10,9 @@ app.get("/", (req, res) => {
   res.send("Bot is working 🚀");
 });
 
-// webhook endpoint
+// webhook endpoint для Telegram
 app.post(`/bot${BOT_TOKEN}`, (req, res) => {
-  console.log("Получено сообщение от Telegram:", req.body); // <-- сюда Telegram шлёт данные
+  console.log("Получено сообщение от Telegram:", req.body);
   res.sendStatus(200);
 });
 
