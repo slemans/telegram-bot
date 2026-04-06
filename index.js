@@ -1,20 +1,30 @@
 import express from "express";
+import cron from "node-cron";
 
 const app = express();
 app.use(express.json());
 
-const BOT_TOKEN = process.env.BOT_TOKEN; // Telegram bot token из Render env
-const MOYK_API_KEY = process.env.MOYK_API_KEY; // Moyklass API key из Render env
+// =======================
+// ENV
+// =======================
+const BOT_TOKEN = process.env.BOT_TOKEN;
+const MOYK_API_KEY = process.env.MOYK_API_KEY;
 
-// Массив для хранения chat_id пользователей
-const users = new Map(); // Map<Telegram chat_id, Moyklass clientId> для сопоставления
+// =======================
+// Хранилище пользователей
+// =======================
+const users = new Map(); // chat_id → clientId
 
+// =======================
 // Проверка сервера
+// =======================
 app.get("/", (req, res) => {
   res.send("Bot is working 🚀");
 });
 
-// Webhook endpoint для Telegram
+// =======================
+// Telegram Webhook
+// =======================
 app.post(`/bot${BOT_TOKEN}`, async (req, res) => {
   const body = req.body;
   console.log("Получено сообщение от Telegram:", body);
@@ -26,20 +36,27 @@ app.post(`/bot${BOT_TOKEN}`, async (req, res) => {
     const text = body.message.text;
     const firstName = body.message.from.first_name || "";
 
-    // Сохраняем пользователя
-    users.set(chatId, null); // Пока clientId неизвестен, можно позже сопоставить
+    // сохраняем пользователя (пока без clientId)
+    users.set(chatId, null);
 
-    // Ответ пользователю
-    await fetch(`https://api.telegram.org/bot${BOT_TOKEN}/sendMessage`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
-        chat_id: chatId,
-        text: `Привет, ${firstName}! Ты написал: ${text}`
-      })
-    });
+    // ответ
+    await sendMessage(chatId, `Привет, ${firstName}! Ты написал: ${text}`);
   }
 });
+
+// =======================
+// Отправка сообщений
+// =======================
+async function sendMessage(chatId, text) {
+  await fetch(`https://api.telegram.org/bot${BOT_TOKEN}/sendMessage`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      chat_id: chatId,
+      text: text
+    })
+  });
+}
 
 // =======================
 // Moyklass API
@@ -67,56 +84,8 @@ async function getLessons() {
 }
 
 // =======================
-// Проверка абонементов и уведомления
+// Проверка абонементов
 // =======================
-async function checkExpiringSubscriptions() {
-  const lessons = await getLessons();
-
-  lessons.forEach(lesson => {
-    const endDate = new Date(lesson.subscriptionEndDate);
-    const now = new Date();
-    const diffDays = Math.ceil((endDate - now) / (1000 * 60 * 60 * 24));
-
-    if (diffDays <= 3) { // если абонемент заканчивается через 3 дня
-      // Найдем chat_id пользователя по clientId Moyklass
-      const chatId = Array.from(users.entries())
-        .find(([chat, clientId]) => clientId === lesson.clientId)?.[0];
-
-      if (chatId) {
-        sendNotificationToUser(chatId, `⚠️ Ваш абонемент заканчивается через ${diffDays} дней!`);
-      } 
-    }
-  });
-}
-
-// =======================
-// Отправка уведомлений пользователю
-// =======================
-async function sendNotificationToUser(chatId, message) {
-  await fetch(`https://api.telegram.org/bot${BOT_TOKEN}/sendMessage`, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ chat_id: chatId, text: message })
-  });
-}
-
-// =======================
-// Планировщик проверки
-// =======================
-import cron from "node-cron";
-
-// Раз в день в 10:00 проверяем абонементы
-cron.schedule("0 10 * * *", () => {
-  console.log("Проверяем абонементы...");
-  checkExpiringSubscriptions();
-});
-
-// проверим cron
-cron.schedule("*/1 * * * *", () => {
-  console.log("CRON работает 🚀");
-  checkExpiringSubscriptions();
-});
-
 async function checkExpiringSubscriptions() {
   const lessons = await getLessons();
 
@@ -124,8 +93,47 @@ async function checkExpiringSubscriptions() {
 
   lessons.forEach(lesson => {
     console.log("Lesson:", lesson);
+
+    if (!lesson.subscriptionEndDate) return;
+
+    const endDate = new Date(lesson.subscriptionEndDate);
+    const now = new Date();
+    const diffDays = Math.ceil((endDate - now) / (1000 * 60 * 60 * 24));
+
+    if (diffDays <= 3) {
+      const chatId = Array.from(users.entries())
+        .find(([chat, clientId]) => clientId === lesson.clientId)?.[0];
+
+      if (chatId) {
+        sendMessage(
+          chatId,
+          `⚠️ Ваш абонемент заканчивается через ${diffDays} дней!`
+        );
+      }
+    }
   });
 }
 
+// =======================
+// CRON
+// =======================
+
+// тест — каждую минуту
+cron.schedule("*/1 * * * *", () => {
+  console.log("CRON работает 🚀");
+  checkExpiringSubscriptions();
+});
+
+// прод — раз в день в 10:00
+// cron.schedule("0 10 * * *", () => {
+//   console.log("Проверяем абонементы...");
+//   checkExpiringSubscriptions();
+// });
+
+// =======================
+// Запуск сервера
+// =======================
 const PORT = process.env.PORT || 3000;
-app.listen(PORT, () => console.log("Server started on port", PORT));
+app.listen(PORT, () => {
+  console.log("Server started on port", PORT);
+});
