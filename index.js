@@ -5,29 +5,22 @@ const app = express();
 app.use(express.json());
 
 // =======================
-// ENV
-// =======================
 const BOT_TOKEN = process.env.BOT_TOKEN;
 const MOYK_API_KEY = process.env.MOYK_API_KEY;
 
-// =======================
-// Хранилище пользователей
-// =======================
-const users = new Map(); // chat_id → clientId
+const users = new Map(); // chat_id → userId
 
-// =======================
-// Проверка сервера
 // =======================
 app.get("/", (req, res) => {
   res.send("Bot is working 🚀");
 });
 
 // =======================
-// Telegram Webhook
+// Telegram webhook
 // =======================
 app.post(`/bot${BOT_TOKEN}`, async (req, res) => {
   const body = req.body;
-  console.log("Получено сообщение:", body);
+  console.log("Сообщение:", body);
 
   res.sendStatus(200);
 
@@ -37,174 +30,144 @@ app.post(`/bot${BOT_TOKEN}`, async (req, res) => {
   const text = body.message.text?.trim();
   const firstName = body.message.from.first_name || "";
 
-  // /start
   if (text === "/start") {
-    await sendMessage(
-      chatId,
-      `Привет, ${firstName}! 👋\n\nВведите ваш номер телефона (например: 375291234567)`
-    );
+    await sendMessage(chatId, `Привет, ${firstName} 👋\nВведи номер телефона`);
     return;
   }
 
-  // если ввели телефон
   if (/^\d{10,15}$/.test(text)) {
     await handlePhone(chatId, text);
     return;
   }
 
-  await sendMessage(chatId, "❌ Введите корректный номер телефона");
+  await sendMessage(chatId, "❌ Введите номер телефона цифрами");
 });
 
 // =======================
-// Отправка сообщений
+// Telegram send
 // =======================
 async function sendMessage(chatId, text) {
   await fetch(`https://api.telegram.org/bot${BOT_TOKEN}/sendMessage`, {
     method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({
-      chat_id: chatId,
-      text: text
-    })
+    headers: {"Content-Type": "application/json"},
+    body: JSON.stringify({ chat_id: chatId, text })
   });
 }
 
 // =======================
 // Moyklass TOKEN
 // =======================
-async function getMoyklassToken() {
-  try {
-    const response = await fetch("https://api.moyklass.com/v1/company/auth/getToken", {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json"
-      },
-      body: JSON.stringify({
-        apiKey: MOYK_API_KEY
-      })
-    });
+async function getToken() {
+  const res = await fetch("https://api.moyklass.com/v1/company/auth/getToken", {
+    method: "POST",
+    headers: {"Content-Type": "application/json"},
+    body: JSON.stringify({ apiKey: MOYK_API_KEY })
+  });
 
-    const data = await response.json();
-    console.log("TOKEN:", data);
+  const data = await res.json();
+  console.log("TOKEN:", data);
 
-    return data.accessToken;
-  } catch (err) {
-    console.error("Ошибка токена:", err);
-    return null;
-  }
+  return data.accessToken;
 }
 
 // =======================
-// Найти клиента по телефону
+// Найти пользователя
 // =======================
-async function findClientByPhone(phone) {
-  const token = await getMoyklassToken();
-  if (!token) return null;
+async function findUserByPhone(phone) {
+  const token = await getToken();
 
-  try {
-    const response = await fetch(`https://api.moyklass.com/v1/company/clients?phone=${phone}`, {
-      method: "GET",
+  const res = await fetch(
+    `https://api.moyklass.com/v1/company/users?phone=${phone}`,
+    {
       headers: {
-        "Authorization": `Bearer ${token}`,
-        "Content-Type": "application/json"
+        "Authorization": `Bearer ${token}`
       }
-    });
+    }
+  );
 
-    const data = await response.json();
-    console.log("CLIENTS:", data);
+  const data = await res.json();
+  console.log("USERS:", data);
 
-    return data.result?.[0] || null;
-  } catch (err) {
-    console.error("Ошибка поиска клиента:", err);
-    return null;
-  }
+  return data.result?.[0] || null;
 }
 
 // =======================
 // Получить абонементы
 // =======================
-async function getSubscriptions(clientId) {
-  const token = await getMoyklassToken();
-  if (!token) return [];
+async function getSubscriptions(userId) {
+  const token = await getToken();
 
-  try {
-    const response = await fetch(
-      `https://api.moyklass.com/v1/company/subscriptions?clientId=${clientId}`,
-      {
-        method: "GET",
-        headers: {
-          "Authorization": `Bearer ${token}`,
-          "Content-Type": "application/json"
-        }
+  const res = await fetch(
+    `https://api.moyklass.com/v1/company/subscriptions?userId=${userId}`,
+    {
+      headers: {
+        "Authorization": `Bearer ${token}`
       }
-    );
+    }
+  );
 
-    const data = await response.json();
-    console.log("SUBSCRIPTIONS:", data);
+  const data = await res.json();
+  console.log("SUBS:", data);
 
-    return data.result || [];
-  } catch (err) {
-    console.error("Ошибка абонементов:", err);
-    return [];
-  }
+  return data.result || [];
 }
 
 // =======================
 // Обработка телефона
 // =======================
 async function handlePhone(chatId, phone) {
-  await sendMessage(chatId, "🔍 Ищем вас в системе...");
+  await sendMessage(chatId, "🔍 Ищем...");
 
-  const client = await findClientByPhone(phone);
+  const user = await findUserByPhone(phone);
 
-  if (!client) {
-    await sendMessage(chatId, "❌ Клиент не найден. Проверьте номер телефона.");
+  if (!user) {
+    await sendMessage(chatId, "❌ Пользователь не найден");
     return;
   }
 
-  // сохраняем связь
-  users.set(chatId, client.id);
+  users.set(chatId, user.id);
 
-  await sendMessage(chatId, `✅ Найден: ${client.name}`);
+  await sendMessage(
+    chatId,
+    `✅ Найден: ${user.name}\nСтатус: ${user.clientStateId}`
+  );
 
-  const subscriptions = await getSubscriptions(client.id);
+  const subs = await getSubscriptions(user.id);
 
-  if (!subscriptions.length) {
-    await sendMessage(chatId, "У вас нет активных абонементов");
+  if (!subs.length) {
+    await sendMessage(chatId, "У вас нет абонементов");
     return;
   }
 
-  let message = "📊 Ваши абонементы:\n\n";
+  let msg = "📊 Абонементы:\n\n";
 
-  subscriptions.forEach(sub => {
-    message += `• ${sub.name}\n`;
-    message += `Осталось занятий: ${sub.balance}\n`;
-    message += `Действует до: ${sub.endDate}\n\n`;
+  subs.forEach(sub => {
+    msg += `• ${sub.name}\n`;
+    msg += `Осталось: ${sub.balance}\n`;
+    msg += `До: ${sub.endDate}\n\n`;
   });
 
-  await sendMessage(chatId, message);
+  await sendMessage(chatId, msg);
 }
 
 // =======================
-// CRON (уведомления)
+// CRON
 // =======================
 cron.schedule("0 10 * * *", async () => {
-  console.log("Проверка абонементов...");
+  console.log("Проверка...");
 
-  for (const [chatId, clientId] of users.entries()) {
-    if (!clientId) continue;
-
-    const subs = await getSubscriptions(clientId);
+  for (const [chatId, userId] of users.entries()) {
+    const subs = await getSubscriptions(userId);
 
     subs.forEach(sub => {
-      const endDate = new Date(sub.endDate);
+      const end = new Date(sub.endDate);
       const now = new Date();
-      const diffDays = Math.ceil((endDate - now) / (1000 * 60 * 60 * 24));
+      const days = Math.ceil((end - now) / (1000 * 60 * 60 * 24));
 
-      if (diffDays <= 3) {
+      if (days <= 3) {
         sendMessage(
           chatId,
-          `⚠️ Абонемент "${sub.name}" заканчивается через ${diffDays} дней!`
+          `⚠️ ${sub.name} заканчивается через ${days} дней`
         );
       }
     });
@@ -212,9 +175,7 @@ cron.schedule("0 10 * * *", async () => {
 });
 
 // =======================
-// Запуск сервера
-// =======================
 const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => {
-  console.log("Server started on port", PORT);
+  console.log("Server started", PORT);
 });
