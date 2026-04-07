@@ -50,7 +50,7 @@ async function findUserByPhone(phone) {
 }
 
 // =======================
-// Получение абонемента
+// Получаем "активный" абонемент через endDate
 // =======================
 async function getActiveSubscription(userId) {
   const token = await getToken();
@@ -68,10 +68,24 @@ async function getActiveSubscription(userId) {
     return null;
   }
 
-  // ищем действующий
-  const active = data.userSubscriptions.find(sub => sub.status === "active");
+  const now = new Date();
 
-  return active || null;
+  // фильтруем только с датой окончания
+  const validSubs = data.userSubscriptions.filter(sub => sub.endDate);
+
+  if (validSubs.length === 0) return null;
+
+  // сортируем по самой дальней дате
+  const sorted = validSubs.sort(
+    (a, b) => new Date(b.endDate) - new Date(a.endDate)
+  );
+
+  const best = sorted[0];
+
+  // если уже закончился — считаем неактивным
+  if (new Date(best.endDate) < now) return null;
+
+  return best;
 }
 
 function formatDate(dateString) {
@@ -92,7 +106,7 @@ app.post(`/bot${BOT_TOKEN}`, async (req, res) => {
   const text = message.text;
 
   if (text === "/start") {
-    await sendMessage(chatId, "Отправь номер телефона 📱");
+    await sendMessage(chatId, "Отправь номер телефона 📱 375000000000");
     return;
   }
 
@@ -106,7 +120,7 @@ app.post(`/bot${BOT_TOKEN}`, async (req, res) => {
 
   const subscription = await getActiveSubscription(user.id);
 
-  let response = `✅ Найден: ${user.name} ${user.id}\n`;
+  let response = `✅ Найден: ${user.name}\n`;
 
   if (!subscription) {
     response += "\n❌ Нет активного абонемента";
