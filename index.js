@@ -50,9 +50,9 @@ async function findUserByPhone(phone) {
 }
 
 // =======================
-// Получаем "активный" абонемент через endDate
+// Получаем ВСЕ активные абонементы
 // =======================
-async function getActiveSubscription(userId) {
+async function getActiveSubscriptions(userId) {
   const token = await getToken();
 
   const res = await fetch(
@@ -65,27 +65,21 @@ async function getActiveSubscription(userId) {
   const data = await res.json();
 
   if (!data.userSubscriptions || data.userSubscriptions.length === 0) {
-    return null;
+    return [];
   }
 
   const now = new Date();
 
-  // фильтруем только с датой окончания
-  const validSubs = data.userSubscriptions.filter(sub => sub.endDate);
+  const active = data.userSubscriptions.filter(sub => {
+    if (!sub.startDate || !sub.endDate) return false;
 
-  if (validSubs.length === 0) return null;
+    const start = new Date(sub.startDate);
+    const end = new Date(sub.endDate);
 
-  // сортируем по самой дальней дате
-  const sorted = validSubs.sort(
-    (a, b) => new Date(b.endDate) - new Date(a.endDate)
-  );
+    return start <= now && now <= end;
+  });
 
-  const best = sorted[0];
-
-  // если уже закончился — считаем неактивным
-  if (new Date(best.endDate) < now) return null;
-
-  return best;
+  return active;
 }
 
 function formatDate(dateString) {
@@ -106,7 +100,7 @@ app.post(`/bot${BOT_TOKEN}`, async (req, res) => {
   const text = message.text;
 
   if (text === "/start") {
-    await sendMessage(chatId, "Отправь номер телефона 📱 375000000000");
+    await sendMessage(chatId, "Отправь номер телефона 📱");
     return;
   }
 
@@ -118,22 +112,25 @@ app.post(`/bot${BOT_TOKEN}`, async (req, res) => {
     return;
   }
 
-  const subscription = await getActiveSubscription(user.id);
+  const subscriptions = await getActiveSubscriptions(user.id);
 
-  let response = `✅ Найден: ${user.name}\n`;
+  let response = `✅ Найден: ${user.name} ${user.id}\n`;
 
-  if (!subscription) {
-    response += "\n❌ Нет активного абонемента";
+  if (subscriptions.length === 0) {
+    response += "\n❌ Нет активных абонементов";
     await sendMessage(chatId, response);
     return;
   }
 
-  response += `
-🎫 Абонемент:
-- Название: ${subscription.name ?? "не указано"}
-- Осталось занятий: ${subscription.remainingVisits ?? "неизвестно"}
-- Действует до: ${formatDate(subscription.endDate)}
+  response += `\n🎫 Активные абонементы:\n`;
+
+  subscriptions.forEach((sub, i) => {
+    response += `
+${i + 1}) ${sub.name ?? "Без названия"}
+- Осталось: ${sub.remainingVisits ?? "∞"}
+- Период: ${formatDate(sub.startDate)} - ${formatDate(sub.endDate)}
 `;
+  });
 
   await sendMessage(chatId, response);
 });
