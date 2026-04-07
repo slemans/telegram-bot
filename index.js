@@ -13,7 +13,10 @@ async function sendMessage(chatId, text) {
   await fetch(`https://api.telegram.org/bot${BOT_TOKEN}/sendMessage`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ chat_id: chatId, text })
+    body: JSON.stringify({
+      chat_id: chatId,
+      text
+    })
   });
 }
 
@@ -50,7 +53,7 @@ async function findUserByPhone(phone) {
 }
 
 // =======================
-// Получаем ВСЕ активные абонементы
+// АКТИВНЫЕ АБОНЕМЕНТЫ
 // =======================
 async function getActiveSubscriptions(userId) {
   const token = await getToken();
@@ -64,20 +67,33 @@ async function getActiveSubscriptions(userId) {
 
   const data = await res.json();
 
-  if (!data.userSubscriptions || data.userSubscriptions.length === 0) {
-    return [];
-  }
+  if (!data.userSubscriptions) return [];
 
   const now = new Date();
 
-  const active = data.userSubscriptions.filter(sub => {
-    if (!sub.startDate || !sub.endDate) return false;
+  const active = data.userSubscriptions
+    .filter(sub => {
+      if (!sub.beginDate || !sub.endDate) return false;
 
-    const start = new Date(sub.startDate);
-    const end = new Date(sub.endDate);
+      const begin = new Date(sub.beginDate);
+      const end = new Date(sub.endDate);
 
-    return start <= now && now <= end;
-  });
+      return begin <= now && now <= end;
+    })
+    .map(sub => {
+      let remaining = "∞";
+
+      if (sub.visitCount != null && sub.visitedCount != null) {
+        remaining = sub.visitCount - sub.visitedCount;
+      }
+
+      return {
+        name: sub.name ?? "Без названия",
+        beginDate: sub.beginDate,
+        endDate: sub.endDate,
+        remaining
+      };
+    });
 
   return active;
 }
@@ -112,11 +128,11 @@ app.post(`/bot${BOT_TOKEN}`, async (req, res) => {
     return;
   }
 
-  const subscriptions = await getActiveSubscriptions(user.id);
+  const subs = await getActiveSubscriptions(user.id);
 
   let response = `✅ Найден: ${user.name} ${user.id}\n`;
 
-  if (subscriptions.length === 0) {
+  if (subs.length === 0) {
     response += "\n❌ Нет активных абонементов";
     await sendMessage(chatId, response);
     return;
@@ -124,11 +140,11 @@ app.post(`/bot${BOT_TOKEN}`, async (req, res) => {
 
   response += `\n🎫 Активные абонементы:\n`;
 
-  subscriptions.forEach((sub, i) => {
+  subs.forEach((sub, i) => {
     response += `
-${i + 1}) ${sub.name ?? "Без названия"}
-- Осталось: ${sub.remainingVisits ?? "∞"}
-- Период: ${formatDate(sub.startDate)} - ${formatDate(sub.endDate)}
+${i + 1}) ${sub.name}
+- Осталось: ${sub.remaining}
+- Период: ${formatDate(sub.beginDate)} - ${formatDate(sub.endDate)}
 `;
   });
 
@@ -137,4 +153,6 @@ ${i + 1}) ${sub.name ?? "Без названия"}
 
 // =======================
 const PORT = process.env.PORT || 3000;
-app.listen(PORT, () => console.log("Server started on port", PORT));
+app.listen(PORT, () => {
+  console.log("Server started on port", PORT);
+});
