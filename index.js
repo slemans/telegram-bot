@@ -53,9 +53,9 @@ async function findUserByPhone(phone) {
 }
 
 // =======================
-// АКТИВНЫЕ АБОНЕМЕНТЫ
+// Берем ВСЕ абонементы где endDate >= сегодня
 // =======================
-async function getActiveSubscriptions(userId) {
+async function getSubscriptions(userId) {
   const token = await getToken();
 
   const res = await fetch(
@@ -71,14 +71,12 @@ async function getActiveSubscriptions(userId) {
 
   const now = new Date();
 
-  const active = data.userSubscriptions
+  return data.userSubscriptions
     .filter(sub => {
-      if (!sub.beginDate || !sub.endDate) return false;
+      if (!sub.endDate) return false;
 
-      const begin = new Date(sub.beginDate);
       const end = new Date(sub.endDate);
-
-      return begin <= now && now <= end;
+      return end >= now;
     })
     .map(sub => {
       let remaining = "∞";
@@ -88,14 +86,11 @@ async function getActiveSubscriptions(userId) {
       }
 
       return {
-        name: sub.name ?? "Без названия",
-        beginDate: sub.beginDate,
+        mainClassId: sub.mainClassId ?? "нет",
         endDate: sub.endDate,
         remaining
       };
     });
-
-  return active;
 }
 
 function formatDate(dateString) {
@@ -128,7 +123,7 @@ app.post(`/bot${BOT_TOKEN}`, async (req, res) => {
     return;
   }
 
-  const subs = await getActiveSubscriptions(user.id);
+  const subs = await getSubscriptions(user.id);
 
   let response = `✅ Найден: ${user.name} ${user.id}\n`;
 
@@ -138,13 +133,13 @@ app.post(`/bot${BOT_TOKEN}`, async (req, res) => {
     return;
   }
 
-  response += `\n🎫 Активные абонементы:\n`;
+  response += `\n📦 Найденные абонементы:\n`;
 
   subs.forEach((sub, i) => {
     response += `
-${i + 1}) ${sub.name}
+${i + 1}) mainClassId: ${sub.mainClassId}
 - Осталось: ${sub.remaining}
-- Период: ${formatDate(sub.beginDate)} - ${formatDate(sub.endDate)}
+- Действует до: ${formatDate(sub.endDate)}
 `;
   });
 
