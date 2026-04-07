@@ -68,20 +68,34 @@ function formatDate(dateString) {
   return date.toLocaleDateString("ru-RU");
 }
 
-function getNextLesson(user) {
-  if (!user.joins || user.joins.length === 0) return null;
+async function getNextLesson(user) {
+  const token = await getToken();
 
-  const upcoming = user.joins
-    .filter(j => j.status === "study" && j.stats?.nextRecord)
-    .map(j => ({ 
-      date: j.stats.nextRecord,
-      className: j.classId,
-      trainer: j.trainer ?? "не указан",
-      schedule: j.schedule ?? "не указано"
-    }))
+  const now = new Date().toISOString();
+
+  const res = await fetch(
+    `https://api.moyklass.com/v1/company/records?userId=${user.id}&dateFrom=${now}`,
+    {
+      headers: { "x-access-token": token }
+    }
+  );
+
+  const data = await res.json();
+
+  if (!data.records || data.records.length === 0) return null;
+
+  const upcoming = data.records
+    .filter(r => r.date) // есть дата
     .sort((a, b) => new Date(a.date) - new Date(b.date));
 
-  return upcoming[0] || null;
+  const lesson = upcoming[0];
+
+  return {
+    date: lesson.date,
+    className: lesson.class?.name ?? "не указано",
+    trainer: lesson.trainer?.name ?? "не указан",
+    schedule: lesson.class?.schedule ?? "не указано"
+  };
 }
 
 // =======================
