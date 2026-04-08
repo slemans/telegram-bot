@@ -7,38 +7,35 @@ const BOT_TOKEN = process.env.BOT_TOKEN;
 const MOYK_API_KEY = process.env.MOYK_API_KEY;
 const ONE_DAY_MS = 24 * 60 * 60 * 1000;
 
-// In-memory state for dialog and reminders.
+// In-memory state for reminders.
 // If app restarts, this state resets.
-const pendingSubscriptionChoice = new Map();
-const pendingReminderConfirm = new Map();
 const reminderJobs = new Map();
+const availableSubscriptions = new Map();
 
 // =======================
 // Telegram
 // =======================
-async function sendMessage(chatId, text) {
+async function sendMessage(chatId, text, extra = {}) {
   await fetch(`https://api.telegram.org/bot${BOT_TOKEN}/sendMessage`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({
       chat_id: chatId,
-      text
+      text,
+      ...extra
     })
   });
 }
 
-function normalizeText(text) {
-  return text.trim().toLowerCase();
-}
-
-function isYes(text) {
-  const normalized = normalizeText(text);
-  return normalized === "да" || normalized === "yes" || normalized === "y";
-}
-
-function isNo(text) {
-  const normalized = normalizeText(text);
-  return normalized === "нет" || normalized === "no" || normalized === "n";
+async function answerCallbackQuery(callbackQueryId, text) {
+  await fetch(`https://api.telegram.org/bot${BOT_TOKEN}/answerCallbackQuery`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      callback_query_id: callbackQueryId,
+      text
+    })
+  });
 }
 
 // =======================
@@ -179,6 +176,63 @@ setInterval(() => {
 app.post(`/bot${BOT_TOKEN}`, async (req, res) => {
   res.sendStatus(200);
 
+  const callbackQuery = req.body.callback_query;
+  if (callbackQuery) {
+    const chatId = callbackQuery.message?.chat?.id;
+    const callbackData = callbackQuery.data || "";
+
+    if (!chatId || !callbackData) {
+      await answerCallbackQuery(callbackQuery.id, "Некорректные данные.");
+      return;
+    }
+
+    const [action, subIdRaw] = callbackData.split(":");
+    const subId = Number.parseInt(subIdRaw, 10);
+    const subscriptionKey = `${chatId}:${subId}`;
+    const sub = availableSubscriptions.get(subscriptionKey);
+
+    if (!sub) {
+      await answerCallbackQuery(callbackQuery.id, "Абонемент не найден.");
+      return;
+    }
+
+    if (action === "reminder_yes") {
+      const remindOnIso = getReminderDateIso(sub.endDate);
+      if (!remindOnIso || sub.endDate == null) {
+        await answerCallbackQuery(callbackQuery.id, "Не удалось поставить напоминание.");
+        return;
+      }
+
+      reminderJobs.set(subscriptionKey, {
+        chatId,
+        subscriptionId: sub.id,
+        className: sub.className,
+        endDate: sub.endDate,
+        remindOnIso,
+        sent: false
+      });
+
+      await answerCallbackQuery(callbackQuery.id, "Напоминание включено.");
+      await sendMessage(
+        chatId,
+        `✅ Напоминание включено для "${sub.className}". Напишу за 3 дня до окончания (${formatDate(
+          sub.endDate
+        )}).`
+      );
+      return;
+    }
+
+    if (action === "reminder_no") {
+      reminderJobs.delete(subscriptionKey);
+      await answerCallbackQuery(callbackQuery.id, "Ок, без напоминания.");
+      await sendMessage(chatId, `Ок, для "${sub.className}" напоминание не включено.`);
+      return;
+    }
+
+    await answerCallbackQuery(callbackQuery.id, "Неизвестная команда.");
+    return;
+  }
+
   const message = req.body.message;
   if (!message) return;
 
@@ -188,70 +242,6 @@ app.post(`/bot${BOT_TOKEN}`, async (req, res) => {
 
   if (text === "/start") {
     await sendMessage(chatId, "Отправь номер телефона 📱");
-    return;
-  }
-
-  const pendingChoice = pendingSubscriptionChoice.get(chatId);
-  if (pendingChoice) {
-    const selectedIndex = Number.parseInt(text, 10) - 1;
-    const selectedSub = pendingChoice.subscriptions[selectedIndex];
-
-    if (!selectedSub) {
-      await sendMessage(chatId, "Выберите номер абонемента из списка (например: 1).");
-      return;
-    }
-
-    pendingSubscriptionChoice.delete(chatId);
-    pendingReminderConfirm.set(chatId, {
-      userName: pendingChoice.userName,
-      subscription: selectedSub
-    });
-
-    await sendMessage(
-      chatId,
-      `Напомнить за 3 дня до окончания абонемента "${selectedSub.className}"?\nОтветь: Да или Нет`
-    );
-    return;
-  }
-
-  const pendingConfirm = pendingReminderConfirm.get(chatId);
-  if (pendingConfirm) {
-    if (isYes(text)) {
-      const { subscription, userName } = pendingConfirm;
-      const remindOnIso = getReminderDateIso(subscription.endDate);
-
-      if (!remindOnIso || subscription.endDate == null) {
-        await sendMessage(chatId, "Не удалось поставить напоминание: у абонемента не указана дата окончания.");
-        pendingReminderConfirm.delete(chatId);
-        return;
-      }
-
-      const reminderKey = `${chatId}:${subscription.id}`;
-      reminderJobs.set(reminderKey, {
-        chatId,
-        userName,
-        subscriptionId: subscription.id,
-        className: subscription.className,
-        endDate: subscription.endDate,
-        remindOnIso,
-        sent: false
-      });
-
-      pendingReminderConfirm.delete(chatId);
-      await sendMessage(
-        chatId,
-        `✅ Отлично! Напомню за 3 дня до окончания (${formatDate(subscription.endDate)}).`
-      );
-      return;
-    }
-
-    if (isNo(text)) {
-      pendingReminderConfirm.delete(chatId);
-      await sendMessage(chatId, "Ок, напоминание не включено.");
-      return;
-    }
-
-    await sendMessage(chatId, "Пожалуйста, ответь: Да или Нет.");
     return;
   }
 
@@ -289,14 +279,22 @@ ${i + 1}. ${sub.className}
   });
 
   await sendMessage(chatId, response);
-  pendingSubscriptionChoice.set(chatId, {
-    userName: user.name,
-    subscriptions: subs
-  });
-  await sendMessage(
-    chatId,
-    "Выберите абонемент для напоминания: отправьте номер из списка (1, 2, 3...)."
-  );
+
+  for (const sub of subs) {
+    const subscriptionKey = `${chatId}:${sub.id}`;
+    availableSubscriptions.set(subscriptionKey, sub);
+
+    await sendMessage(chatId, "Хотите получать уведомления за 3 дня до окончания абонемента?", {
+      reply_markup: {
+        inline_keyboard: [
+          [
+            { text: "Да", callback_data: `reminder_yes:${sub.id}` },
+            { text: "Нет", callback_data: `reminder_no:${sub.id}` }
+          ]
+        ]
+      }
+    });
+  }
 });
 
 // =======================
