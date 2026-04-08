@@ -42,55 +42,54 @@ async function findUserByPhone(phone) {
   const token = await getToken();
 
   const res = await fetch(
-    `https://api.moyklass.com/v1/company/users?phone=${phone}`,
+    `https://api.moyklass.com/v1/company/users?phone=${phone}&limit=1`,
     {
       headers: { "x-access-token": token }
     }
   );
 
+  if (!res.ok) return null;
   const data = await res.json();
   return data.users?.[0] || null;
 }
 
 // =======================
-// Берем ВСЕ абонементы где endDate >= сегодня
+// Берем только активные абонементы (statusId = 2)
+// и считаем остаток посещений.
 // =======================
 async function getSubscriptions(userId) {
   const token = await getToken();
 
   const res = await fetch(
-    `https://api.moyklass.com/v1/company/userSubscriptions?userId=${userId}`,
+    `https://api.moyklass.com/v1/company/userSubscriptions?userId=${userId}&statusId=2&limit=100`,
     {
       headers: { "x-access-token": token }
     }
   );
 
+  if (!res.ok) return [];
   const data = await res.json();
+  const subs = data.subscriptions || [];
 
-  if (!data.userSubscriptions) return [];
-
-  const now = new Date();
-
-  return data.userSubscriptions
-    .filter(sub => {
-      if (!sub.endDate) return false;
-
-      const end = new Date(sub.endDate);
-      return end >= now;
-    })
+  return subs
     .map(sub => {
-      let remaining = "∞";
+      let remaining = null;
 
       if (sub.visitCount != null && sub.visitedCount != null) {
-        remaining = sub.visitCount - sub.visitedCount;
+        remaining = Math.max(0, sub.visitCount - sub.visitedCount);
       }
 
       return {
-        mainClassId: sub.mainClassId ?? "нет",
-        endDate: sub.endDate,
-        remaining
+        id: sub.id,
+        externalId: sub.externalId ?? null,
+        endDate: sub.endDate ?? null,
+        visitCount: sub.visitCount ?? null,
+        visitedCount: sub.visitedCount ?? null,
+        remaining,
+        statusId: sub.statusId
       };
-    });
+    })
+    .filter(sub => sub.remaining == null || sub.remaining > 0);
 }
 
 function formatDate(dateString) {
@@ -109,6 +108,7 @@ app.post(`/bot${BOT_TOKEN}`, async (req, res) => {
 
   const chatId = message.chat.id;
   const text = message.text;
+  if (!text) return;
 
   if (text === "/start") {
     await sendMessage(chatId, "Отправь номер телефона 📱");
@@ -125,20 +125,26 @@ app.post(`/bot${BOT_TOKEN}`, async (req, res) => {
 
   const subs = await getSubscriptions(user.id);
 
-  let response = `✅ Найден: ${user.name} ${user.id}\n`;
+  let response = `✅ Клиент найден: ${user.name}\nID: ${user.id}`;
 
   if (subs.length === 0) {
-    response += "\n❌ Нет активных абонементов";
+    response += "\n\n❌ Активных абонементов с остатком нет";
     await sendMessage(chatId, response);
     return;
   }
 
-  response += `\n📦 Найденные абонементы:\n`;
+  response += "\n\n🎫 Активные абонементы с остатком:";
 
   subs.forEach((sub, i) => {
+    const label = sub.externalId ? `№${sub.externalId}` : `ID ${sub.id}`;
+    const remainingText =
+      sub.remaining == null
+        ? "безлимит"
+        : `${sub.remaining} (из ${sub.visitCount ?? "?"})`;
+
     response += `
-${i + 1}) mainClassId: ${sub.mainClassId}
-- Осталось: ${sub.remaining}
+${i + 1}) ${label}
+- Осталось занятий: ${remainingText}
 - Действует до: ${formatDate(sub.endDate)}
 `;
   });
