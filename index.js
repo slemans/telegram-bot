@@ -251,6 +251,15 @@ app.post(`/bot${BOT_TOKEN}`, async (req, res) => {
   const fromId = message.from?.id;
   const contact = message.contact;
 
+  if (text === "/help") {
+    await sendMessage(chatId,"🛠 *Поддержка*
+    Если что-то не работает или есть вопросы:
+    👤 Pavel  
+    📱 @slemins  
+    Напишите сообщение и опишите проблему 🙌");
+    return;
+  }
+  
   if (text === "/start") {
     const activeReminders = [...reminderJobs.values()].filter(
       reminder => reminder.chatId === chatId && !reminder.sent
