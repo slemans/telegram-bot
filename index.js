@@ -5,6 +5,13 @@ app.use(express.json());
 
 const BOT_TOKEN = process.env.BOT_TOKEN;
 const MOYK_API_KEY = process.env.MOYK_API_KEY;
+const ONE_DAY_MS = 24 * 60 * 60 * 1000;
+
+// In-memory state for dialog and reminders.
+// If app restarts, this state resets.
+const pendingSubscriptionChoice = new Map();
+const pendingReminderConfirm = new Map();
+const reminderJobs = new Map();
 
 // =======================
 // Telegram
@@ -18,6 +25,20 @@ async function sendMessage(chatId, text) {
       text
     })
   });
+}
+
+function normalizeText(text) {
+  return text.trim().toLowerCase();
+}
+
+function isYes(text) {
+  const normalized = normalizeText(text);
+  return normalized === "да" || normalized === "yes" || normalized === "y";
+}
+
+function isNo(text) {
+  const normalized = normalizeText(text);
+  return normalized === "нет" || normalized === "no" || normalized === "n";
 }
 
 // =======================
@@ -117,6 +138,41 @@ function formatDate(dateString) {
   return new Date(dateString).toLocaleDateString("ru-RU");
 }
 
+function formatIsoDay(date) {
+  return date.toISOString().slice(0, 10);
+}
+
+function getReminderDateIso(endDate) {
+  const end = new Date(endDate);
+  if (Number.isNaN(end.getTime())) return null;
+  const reminderDate = new Date(end.getTime() - 3 * ONE_DAY_MS);
+  return formatIsoDay(reminderDate);
+}
+
+async function processScheduledReminders() {
+  const todayIso = formatIsoDay(new Date());
+
+  for (const [key, reminder] of reminderJobs.entries()) {
+    if (reminder.sent) continue;
+    if (reminder.remindOnIso !== todayIso) continue;
+
+    await sendMessage(
+      reminder.chatId,
+      `⏰ Ваш абонемент "${reminder.className}" скоро закончится (${formatDate(
+        reminder.endDate
+      )}), не забудьте продлить.`
+    );
+
+    reminderJobs.set(key, { ...reminder, sent: true });
+  }
+}
+
+setInterval(() => {
+  processScheduledReminders().catch(err => {
+    console.error("Failed to process reminders:", err);
+  });
+}, 60 * 60 * 1000);
+
 // =======================
 // Webhook
 // =======================
@@ -132,6 +188,70 @@ app.post(`/bot${BOT_TOKEN}`, async (req, res) => {
 
   if (text === "/start") {
     await sendMessage(chatId, "Отправь номер телефона 📱");
+    return;
+  }
+
+  const pendingChoice = pendingSubscriptionChoice.get(chatId);
+  if (pendingChoice) {
+    const selectedIndex = Number.parseInt(text, 10) - 1;
+    const selectedSub = pendingChoice.subscriptions[selectedIndex];
+
+    if (!selectedSub) {
+      await sendMessage(chatId, "Выберите номер абонемента из списка (например: 1).");
+      return;
+    }
+
+    pendingSubscriptionChoice.delete(chatId);
+    pendingReminderConfirm.set(chatId, {
+      userName: pendingChoice.userName,
+      subscription: selectedSub
+    });
+
+    await sendMessage(
+      chatId,
+      `Напомнить за 3 дня до окончания абонемента "${selectedSub.className}"?\nОтветь: Да или Нет`
+    );
+    return;
+  }
+
+  const pendingConfirm = pendingReminderConfirm.get(chatId);
+  if (pendingConfirm) {
+    if (isYes(text)) {
+      const { subscription, userName } = pendingConfirm;
+      const remindOnIso = getReminderDateIso(subscription.endDate);
+
+      if (!remindOnIso || subscription.endDate == null) {
+        await sendMessage(chatId, "Не удалось поставить напоминание: у абонемента не указана дата окончания.");
+        pendingReminderConfirm.delete(chatId);
+        return;
+      }
+
+      const reminderKey = `${chatId}:${subscription.id}`;
+      reminderJobs.set(reminderKey, {
+        chatId,
+        userName,
+        subscriptionId: subscription.id,
+        className: subscription.className,
+        endDate: subscription.endDate,
+        remindOnIso,
+        sent: false
+      });
+
+      pendingReminderConfirm.delete(chatId);
+      await sendMessage(
+        chatId,
+        `✅ Отлично! Напомню за 3 дня до окончания (${formatDate(subscription.endDate)}).`
+      );
+      return;
+    }
+
+    if (isNo(text)) {
+      pendingReminderConfirm.delete(chatId);
+      await sendMessage(chatId, "Ок, напоминание не включено.");
+      return;
+    }
+
+    await sendMessage(chatId, "Пожалуйста, ответь: Да или Нет.");
     return;
   }
 
@@ -169,6 +289,14 @@ ${i + 1}. ${sub.className}
   });
 
   await sendMessage(chatId, response);
+  pendingSubscriptionChoice.set(chatId, {
+    userName: user.name,
+    subscriptions: subs
+  });
+  await sendMessage(
+    chatId,
+    "Выберите абонемент для напоминания: отправьте номер из списка (1, 2, 3...)."
+  );
 });
 
 // =======================
