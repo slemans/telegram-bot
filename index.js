@@ -140,28 +140,40 @@ function formatIsoDay(date) {
   return date.toISOString().slice(0, 10);
 }
 
-function getReminderDateIso(endDate) {
-  const end = new Date(endDate);
-  if (Number.isNaN(end.getTime())) return null;
-  const reminderDate = new Date(end.getTime() - 3 * ONE_DAY_MS);
-  return formatIsoDay(reminderDate);
+function getNextDayAtHour(date, hour) {
+  const next = new Date(date);
+  next.setDate(next.getDate() + 1);
+  next.setHours(hour, 0, 0, 0);
+  return next;
 }
 
-function getReminderDateTime(endDate) {
-  const remindOnIso = getReminderDateIso(endDate);
-  if (!remindOnIso) return null;
+// Per new rule:
+// first reminder starts when there are 2 days left (inclusive),
+// then continues every day until end date.
+function getInitialReminderDateTime(endDate, now = new Date()) {
+  const end = new Date(endDate);
+  if (Number.isNaN(end.getTime())) return null;
 
-  const remindAt = new Date(`${remindOnIso}T${String(REMINDER_HOUR).padStart(2, "0")}:00:00`);
-  if (Number.isNaN(remindAt.getTime())) return null;
-  return remindAt;
+  const firstReminder = new Date(end);
+  firstReminder.setDate(firstReminder.getDate() - 1);
+  firstReminder.setHours(REMINDER_HOUR, 0, 0, 0);
+
+  if (now.getTime() <= firstReminder.getTime()) return firstReminder;
+  return getNextDayAtHour(now, REMINDER_HOUR);
 }
 
 async function processScheduledReminders() {
   const now = new Date();
 
   for (const [key, reminder] of reminderJobs.entries()) {
-    if (reminder.sent) continue;
-    if (now.getTime() < reminder.remindAtTs) continue;
+    if (!reminder.active) continue;
+    if (now.getTime() < reminder.nextNotifyTs) continue;
+
+    const todayIso = formatIsoDay(now);
+    if (todayIso > reminder.endDateIso) {
+      reminderJobs.set(key, { ...reminder, active: false });
+      continue;
+    }
 
     await sendMessage(
       reminder.chatId,
@@ -170,7 +182,22 @@ async function processScheduledReminders() {
       )}), не забудьте продлить.`
     );
 
-    reminderJobs.set(key, { ...reminder, sent: true });
+    await sendMessage(reminder.chatId, "Отключить уведомления по этому абонементу?", {
+      reply_markup: {
+        inline_keyboard: [
+          [
+            { text: "Да", callback_data: `disable_yes:${reminder.subscriptionId}` },
+            { text: "Нет", callback_data: `disable_no:${reminder.subscriptionId}` }
+          ]
+        ]
+      }
+    });
+
+    const nextNotify = getNextDayAtHour(now, REMINDER_HOUR);
+    reminderJobs.set(key, {
+      ...reminder,
+      nextNotifyTs: nextNotify.getTime()
+    });
   }
 }
 
@@ -207,27 +234,31 @@ app.post(`/bot${BOT_TOKEN}`, async (req, res) => {
     }
 
     if (action === "reminder_yes") {
-      const remindAt = getReminderDateTime(sub.endDate);
+      const remindAt = getInitialReminderDateTime(sub.endDate);
       if (!remindAt || sub.endDate == null) {
         await answerCallbackQuery(callbackQuery.id, "Не удалось поставить напоминание.");
         return;
       }
 
-      const remindOnIso = formatIsoDay(remindAt);
+      const endDateIso = formatIsoDay(new Date(sub.endDate));
       reminderJobs.set(subscriptionKey, {
         chatId,
         subscriptionId: sub.id,
         className: sub.className,
         endDate: sub.endDate,
-        remindOnIso,
+        endDateIso,
+        remindOnIso: formatIsoDay(remindAt),
         remindAtTs: remindAt.getTime(),
-        sent: false
+        nextNotifyTs: remindAt.getTime(),
+        active: true
       });
 
       await answerCallbackQuery(callbackQuery.id, "Напоминание включено.");
       await sendMessage(
         chatId,
-        `✅ Напоминание включено для "${sub.className}". Напишу ${formatDate(remindOnIso)} после ${REMINDER_HOUR}:00.`
+        `✅ Напоминание включено для "${sub.className}". Первое сообщение: ${formatDate(
+          formatIsoDay(remindAt)
+        )} после ${REMINDER_HOUR}:00.`
       );
       return;
     }
@@ -236,6 +267,22 @@ app.post(`/bot${BOT_TOKEN}`, async (req, res) => {
       reminderJobs.delete(subscriptionKey);
       await answerCallbackQuery(callbackQuery.id, "Ок, без напоминания.");
       await sendMessage(chatId, `Ок, для "${sub.className}" напоминание не включено.`);
+      return;
+    }
+
+    if (action === "disable_yes") {
+      const reminder = reminderJobs.get(subscriptionKey);
+      if (reminder) {
+        reminderJobs.set(subscriptionKey, { ...reminder, active: false });
+      }
+      await answerCallbackQuery(callbackQuery.id, "Уведомления отключены.");
+      await sendMessage(chatId, `🔕 Уведомления для "${sub.className}" отключены.`);
+      return;
+    }
+
+    if (action === "disable_no") {
+      await answerCallbackQuery(callbackQuery.id, "Продолжим уведомления.");
+      await sendMessage(chatId, `👌 Продолжу уведомления для "${sub.className}" до окончания абонемента.`);
       return;
     }
 
@@ -253,7 +300,7 @@ app.post(`/bot${BOT_TOKEN}`, async (req, res) => {
 
   if (text === "/start") {
     const activeReminders = [...reminderJobs.values()].filter(
-      reminder => reminder.chatId === chatId && !reminder.sent
+      reminder => reminder.chatId === chatId && reminder.active
     );
 
     if (activeReminders.length > 0) {
@@ -276,6 +323,19 @@ app.post(`/bot${BOT_TOKEN}`, async (req, res) => {
           one_time_keyboard: true
         }
       }
+    );
+    return;
+  }
+
+  if (text === "/help") {
+    await sendMessage(
+      chatId,
+      `🛠 *Поддержка*
+Если что-то не работает
+👤 Павел
+📱 @slemins
+Напишите сообщение и опишите проблему 🙌`,
+      { parse_mode: "Markdown" }
     );
     return;
   }
@@ -335,7 +395,7 @@ ${i + 1}. ${sub.className}
     availableSubscriptions.set(subscriptionKey, sub);
     const existingReminder = reminderJobs.get(subscriptionKey);
 
-    if (existingReminder && !existingReminder.sent) {
+    if (existingReminder && existingReminder.active) {
       await sendMessage(
         chatId,
         `✅ Для "${sub.className}" уведомления уже включены (напоминание: ${formatDate(
@@ -345,7 +405,7 @@ ${i + 1}. ${sub.className}
       continue;
     }
 
-    await sendMessage(chatId, "Хотите получать уведомления за 3 дня до окончания абонемента?", {
+    await sendMessage(chatId, "Включить уведомления об окончании абонемента?", {
       reply_markup: {
         inline_keyboard: [
           [
