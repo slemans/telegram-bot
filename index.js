@@ -5,8 +5,7 @@ app.use(express.json());
 
 const BOT_TOKEN = process.env.BOT_TOKEN;
 const MOYK_API_KEY = process.env.MOYK_API_KEY;
-const ONE_DAY_MS = 24 * 60 * 60 * 1000;
-const REMINDER_HOUR = 10;
+const TIME_OPTIONS = [10, 14, 20];
 
 // In-memory state for reminders.
 // If app restarts, this state resets.
@@ -147,19 +146,16 @@ function getNextDayAtHour(date, hour) {
   return next;
 }
 
-// Per new rule:
-// first reminder starts when there are 2 days left (inclusive),
-// then continues every day until end date.
-function getInitialReminderDateTime(endDate, now = new Date()) {
+function getInitialReminderDateTimeByHour(endDate, notifyHour, now = new Date()) {
   const end = new Date(endDate);
   if (Number.isNaN(end.getTime())) return null;
 
   const firstReminder = new Date(end);
   firstReminder.setDate(firstReminder.getDate() - 2);
-  firstReminder.setHours(REMINDER_HOUR, 0, 0, 0);
+  firstReminder.setHours(notifyHour, 0, 0, 0);
 
   if (now.getTime() <= firstReminder.getTime()) return firstReminder;
-  return getNextDayAtHour(now, REMINDER_HOUR);
+  return getNextDayAtHour(now, notifyHour);
 }
 
 async function processScheduledReminders() {
@@ -193,7 +189,7 @@ async function processScheduledReminders() {
       }
     });
 
-    const nextNotify = getNextDayAtHour(now, REMINDER_HOUR);
+    const nextNotify = getNextDayAtHour(now, reminder.notifyHour ?? 10);
     reminderJobs.set(key, {
       ...reminder,
       nextNotifyTs: nextNotify.getTime()
@@ -227,14 +223,45 @@ app.post(`/bot${BOT_TOKEN}`, async (req, res) => {
     const subId = Number.parseInt(subIdRaw, 10);
     const subscriptionKey = `${chatId}:${subId}`;
     const sub = availableSubscriptions.get(subscriptionKey);
+    const reminder = reminderJobs.get(subscriptionKey);
 
-    if (!sub) {
+    if (!sub && action !== "disable_yes" && action !== "disable_no") {
       await answerCallbackQuery(callbackQuery.id, "Абонемент не найден.");
       return;
     }
 
     if (action === "reminder_yes") {
-      const remindAt = getInitialReminderDateTime(sub.endDate);
+      await answerCallbackQuery(callbackQuery.id, "Выберите время уведомлений.");
+      await sendMessage(chatId, `Выберите время уведомлений для "${sub.className}":`, {
+        reply_markup: {
+          inline_keyboard: [
+            [
+              { text: "🌤 10 AM", callback_data: `reminder_time_10:${sub.id}` },
+              { text: "☀️ 2 PM", callback_data: `reminder_time_14:${sub.id}` },
+              { text: "🌙 8 PM", callback_data: `reminder_time_20:${sub.id}` }
+            ]
+          ]
+        }
+      });
+      return;
+    }
+
+    if (action === "reminder_no") {
+      reminderJobs.delete(subscriptionKey);
+      await answerCallbackQuery(callbackQuery.id, "Ок, без напоминания.");
+      await sendMessage(chatId, `Ок, для "${sub.className}" напоминание не включено.`);
+      return;
+    }
+
+    if (action.startsWith("reminder_time_")) {
+      const hourRaw = action.replace("reminder_time_", "");
+      const notifyHour = Number.parseInt(hourRaw, 10);
+      if (!TIME_OPTIONS.includes(notifyHour)) {
+        await answerCallbackQuery(callbackQuery.id, "Некорректное время.");
+        return;
+      }
+
+      const remindAt = getInitialReminderDateTimeByHour(sub.endDate, notifyHour);
       if (!remindAt || sub.endDate == null) {
         await answerCallbackQuery(callbackQuery.id, "Не удалось поставить напоминание.");
         return;
@@ -247,6 +274,7 @@ app.post(`/bot${BOT_TOKEN}`, async (req, res) => {
         className: sub.className,
         endDate: sub.endDate,
         endDateIso,
+        notifyHour,
         remindOnIso: formatIsoDay(remindAt),
         remindAtTs: remindAt.getTime(),
         nextNotifyTs: remindAt.getTime(),
@@ -256,25 +284,19 @@ app.post(`/bot${BOT_TOKEN}`, async (req, res) => {
       await answerCallbackQuery(callbackQuery.id, "Напоминание включено.");
       await sendMessage(
         chatId,
-        `✅ Напоминание включено для "${sub.className}"`
+        `✅ Напоминание включено для "${sub.className}". Время уведомлений: ${notifyHour}:00.`
       );
       return;
     }
 
-    if (action === "reminder_no") {
-      reminderJobs.delete(subscriptionKey);
-      await answerCallbackQuery(callbackQuery.id, "Ок, без напоминания.");
-      await sendMessage(chatId, `Ок, для "${sub.className}" напоминание не включено.`);
-      return;
-    }
-
     if (action === "disable_yes") {
-      const reminder = reminderJobs.get(subscriptionKey);
       if (reminder) {
         reminderJobs.set(subscriptionKey, { ...reminder, active: false });
+        await answerCallbackQuery(callbackQuery.id, "Уведомления отключены.");
+        await sendMessage(chatId, `🔕 Уведомления для "${reminder.className}" отключены.`);
+        return;
       }
-      await answerCallbackQuery(callbackQuery.id, "Уведомления отключены.");
-      await sendMessage(chatId, `🔕 Уведомления для "${sub.className}" отключены.`);
+      await answerCallbackQuery(callbackQuery.id, "Уведомление уже отключено.");
       return;
     }
 
@@ -304,7 +326,7 @@ app.post(`/bot${BOT_TOKEN}`, async (req, res) => {
     if (activeReminders.length > 0) {
       let remindersText = "✅ У вас уже включены уведомления:\n";
       activeReminders.forEach((reminder, i) => {
-        remindersText += `\n${i + 1}. ${reminder.className}`;
+        remindersText += `\n${i + 1}. ${reminder.className}\n- Время: ${reminder.notifyHour ?? 10}:00`;
       });
       await sendMessage(chatId, remindersText);
     }
@@ -396,7 +418,7 @@ ${i + 1}. ${sub.className}
         chatId,
         `✅ Для "${sub.className}" уведомления уже включены (напоминание: ${formatDate(
           existingReminder.remindOnIso
-        )} после ${REMINDER_HOUR}:00).`
+        )} после ${existingReminder.notifyHour ?? 10}:00).`
       );
       continue;
     }
@@ -405,8 +427,8 @@ ${i + 1}. ${sub.className}
       reply_markup: {
         inline_keyboard: [
           [
-            { text: "Да", callback_data: `reminder_yes:${sub.id}` },
-            { text: "Нет", callback_data: `reminder_no:${sub.id}` }
+            { text: "🔔 Да, включить", callback_data: `reminder_yes:${sub.id}` },
+            { text: "🙅 Нет, не нужно", callback_data: `reminder_no:${sub.id}` }
           ]
         ]
       }
