@@ -252,11 +252,12 @@ app.post(`/bot${BOT_TOKEN}`, async (req, res) => {
   const contact = message.contact;
 
   if (text === "/help") {
-    await sendMessage(chatId,"🛠 *Поддержка*
-    Если что-то не работает или есть вопросы:
-    👤 Pavel  
+    await sendMessage(chatId,`
+    🛠 *Поддержка*
+    Если что-то не работает
+    👤 Павел  
     📱 @slemins  
-    Напишите сообщение и опишите проблему 🙌");
+    Напишите сообщение и опишите проблему 🙌`);
     return;
   }
   
