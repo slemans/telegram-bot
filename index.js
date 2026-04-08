@@ -227,7 +227,7 @@ app.post(`/bot${BOT_TOKEN}`, async (req, res) => {
       await answerCallbackQuery(callbackQuery.id, "Напоминание включено.");
       await sendMessage(
         chatId,
-        `✅ Напоминание включено для "${sub.className}". Напишу ${formatDate(remindOnIso)} после ${REMINDER_HOUR}:00.`
+        `✅ Напоминание включено для "${sub.className}".`
       );
       return;
     }
@@ -271,7 +271,7 @@ app.post(`/bot${BOT_TOKEN}`, async (req, res) => {
       activeReminders.forEach((reminder, i) => {
         remindersText += `\n${i + 1}. ${reminder.className}\n- Напоминание: ${formatDate(
           reminder.remindOnIso
-        )} после ${REMINDER_HOUR}:00`;
+        )}`;
       });
       await sendMessage(chatId, remindersText);
     }
@@ -348,9 +348,7 @@ ${i + 1}. ${sub.className}
     if (existingReminder && !existingReminder.sent) {
       await sendMessage(
         chatId,
-        `✅ Для "${sub.className}" уведомления уже включены (напоминание: ${formatDate(
-          existingReminder.remindOnIso
-        )} после ${REMINDER_HOUR}:00).`
+        `✅ Для "${sub.className}" уведомления уже включены`
       );
       continue;
     }
