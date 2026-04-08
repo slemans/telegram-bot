@@ -6,6 +6,7 @@ app.use(express.json());
 const BOT_TOKEN = process.env.BOT_TOKEN;
 const MOYK_API_KEY = process.env.MOYK_API_KEY;
 const ONE_DAY_MS = 24 * 60 * 60 * 1000;
+const REMINDER_HOUR = 10;
 
 // In-memory state for reminders.
 // If app restarts, this state resets.
@@ -135,10 +136,6 @@ function formatDate(dateString) {
   return new Date(dateString).toLocaleDateString("ru-RU");
 }
 
-function isValidPhoneInput(text) {
-  return /^\d{12}$/.test(text.trim());
-}
-
 function formatIsoDay(date) {
   return date.toISOString().slice(0, 10);
 }
@@ -150,12 +147,21 @@ function getReminderDateIso(endDate) {
   return formatIsoDay(reminderDate);
 }
 
+function getReminderDateTime(endDate) {
+  const remindOnIso = getReminderDateIso(endDate);
+  if (!remindOnIso) return null;
+
+  const remindAt = new Date(`${remindOnIso}T${String(REMINDER_HOUR).padStart(2, "0")}:00:00`);
+  if (Number.isNaN(remindAt.getTime())) return null;
+  return remindAt;
+}
+
 async function processScheduledReminders() {
-  const todayIso = formatIsoDay(new Date());
+  const now = new Date();
 
   for (const [key, reminder] of reminderJobs.entries()) {
     if (reminder.sent) continue;
-    if (reminder.remindOnIso !== todayIso) continue;
+    if (now.getTime() < reminder.remindAtTs) continue;
 
     await sendMessage(
       reminder.chatId,
@@ -201,27 +207,27 @@ app.post(`/bot${BOT_TOKEN}`, async (req, res) => {
     }
 
     if (action === "reminder_yes") {
-      const remindOnIso = getReminderDateIso(sub.endDate);
-      if (!remindOnIso || sub.endDate == null) {
+      const remindAt = getReminderDateTime(sub.endDate);
+      if (!remindAt || sub.endDate == null) {
         await answerCallbackQuery(callbackQuery.id, "Не удалось поставить напоминание.");
         return;
       }
 
+      const remindOnIso = formatIsoDay(remindAt);
       reminderJobs.set(subscriptionKey, {
         chatId,
         subscriptionId: sub.id,
         className: sub.className,
         endDate: sub.endDate,
         remindOnIso,
+        remindAtTs: remindAt.getTime(),
         sent: false
       });
 
       await answerCallbackQuery(callbackQuery.id, "Напоминание включено.");
       await sendMessage(
         chatId,
-        `✅ Напоминание включено для "${sub.className}". Напишу за 3 дня до окончания (${formatDate(
-          sub.endDate
-        )}).`
+        `✅ Напоминание включено для "${sub.className}". Напишу ${formatDate(remindOnIso)} после ${REMINDER_HOUR}:00.`
       );
       return;
     }
@@ -242,22 +248,56 @@ app.post(`/bot${BOT_TOKEN}`, async (req, res) => {
 
   const chatId = message.chat.id;
   const text = message.text;
-  if (!text) return;
+  const fromId = message.from?.id;
+  const contact = message.contact;
 
   if (text === "/start") {
-    await sendMessage(chatId, "Отправь номер телефона в формате 375295781758 (только цифры) 📱");
-    return;
-  }
+    const activeReminders = [...reminderJobs.values()].filter(
+      reminder => reminder.chatId === chatId && !reminder.sent
+    );
 
-  if (!isValidPhoneInput(text)) {
+    if (activeReminders.length > 0) {
+      let remindersText = "✅ У вас уже включены уведомления:\n";
+      activeReminders.forEach((reminder, i) => {
+        remindersText += `\n${i + 1}. ${reminder.className}\n- Напоминание: ${formatDate(
+          reminder.remindOnIso
+        )} после ${REMINDER_HOUR}:00`;
+      });
+      await sendMessage(chatId, remindersText);
+    }
+
     await sendMessage(
       chatId,
-      "❌ Некорректный номер.\nВведите номер только цифрами в формате: 375295781758"
+      "Нажмите кнопку ниже и отправьте свой контакт, чтобы проверить абонементы.",
+      {
+        reply_markup: {
+          keyboard: [[{ text: "Поделиться контактом", request_contact: true }]],
+          resize_keyboard: true,
+          one_time_keyboard: true
+        }
+      }
     );
     return;
   }
 
-  const phone = normalizePhone(text);
+  if (!contact) {
+    await sendMessage(
+      chatId,
+      "❌ Для проверки нужно отправить контакт кнопкой «Поделиться контактом»."
+    );
+    return;
+  }
+
+  if (!fromId || contact.user_id !== fromId) {
+    await sendMessage(chatId, "❌ Можно отправлять только свой контакт.");
+    return;
+  }
+
+  const phone = normalizePhone(contact.phone_number || "");
+  if (!phone) {
+    await sendMessage(chatId, "❌ Не удалось получить номер из контакта.");
+    return;
+  }
   const user = await findUserByPhone(phone);
 
   if (!user) {
@@ -293,6 +333,17 @@ ${i + 1}. ${sub.className}
   for (const sub of subs) {
     const subscriptionKey = `${chatId}:${sub.id}`;
     availableSubscriptions.set(subscriptionKey, sub);
+    const existingReminder = reminderJobs.get(subscriptionKey);
+
+    if (existingReminder && !existingReminder.sent) {
+      await sendMessage(
+        chatId,
+        `✅ Для "${sub.className}" уведомления уже включены (напоминание: ${formatDate(
+          existingReminder.remindOnIso
+        )} после ${REMINDER_HOUR}:00).`
+      );
+      continue;
+    }
 
     await sendMessage(chatId, "Хотите получать уведомления за 3 дня до окончания абонемента?", {
       reply_markup: {
