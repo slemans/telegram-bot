@@ -53,6 +53,18 @@ async function findUserByPhone(phone) {
   return data.users?.[0] || null;
 }
 
+async function getClassNameById(classId, token) {
+  if (!classId) return "Группа не указана";
+
+  const res = await fetch(`https://api.moyklass.com/v1/company/classes/${classId}`, {
+    headers: { "x-access-token": token }
+  });
+
+  if (!res.ok) return `Группа ${classId}`;
+  const data = await res.json();
+  return data.name || `Группа ${classId}`;
+}
+
 // =======================
 // Берем только активные абонементы (statusId = 2)
 // и считаем остаток посещений.
@@ -71,7 +83,7 @@ async function getSubscriptions(userId) {
   const data = await res.json();
   const subs = data.subscriptions || [];
 
-  return subs
+  const preparedSubs = subs
     .map(sub => {
       let remaining = null;
 
@@ -86,10 +98,18 @@ async function getSubscriptions(userId) {
         visitCount: sub.visitCount ?? null,
         visitedCount: sub.visitedCount ?? null,
         remaining,
-        statusId: sub.statusId
+        statusId: sub.statusId,
+        mainClassId: sub.mainClassId ?? null
       };
     })
     .filter(sub => sub.remaining == null || sub.remaining > 0);
+
+  return Promise.all(
+    preparedSubs.map(async sub => ({
+      ...sub,
+      className: await getClassNameById(sub.mainClassId, token)
+    }))
+  );
 }
 
 function formatDate(dateString) {
@@ -125,7 +145,7 @@ app.post(`/bot${BOT_TOKEN}`, async (req, res) => {
 
   const subs = await getSubscriptions(user.id);
 
-  let response = `✅ Клиент найден: ${user.name}\nID: ${user.id}`;
+  let response = `✅ Клиент найден: ${user.name}`;
 
   if (subs.length === 0) {
     response += "\n\n❌ Активных абонементов с остатком нет";
@@ -133,17 +153,16 @@ app.post(`/bot${BOT_TOKEN}`, async (req, res) => {
     return;
   }
 
-  response += "\n\n🎫 Активные абонементы с остатком:";
+  response += "\n\n🎫 Активные абонементы:";
 
   subs.forEach((sub, i) => {
-    const label = sub.externalId ? `№${sub.externalId}` : `ID ${sub.id}`;
     const remainingText =
       sub.remaining == null
         ? "безлимит"
         : `${sub.remaining} (из ${sub.visitCount ?? "?"})`;
 
     response += `
-${i + 1}) ${label}
+${i + 1}. ${sub.className}
 - Осталось занятий: ${remainingText}
 - Действует до: ${formatDate(sub.endDate)}
 `;
