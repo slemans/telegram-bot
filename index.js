@@ -256,9 +256,7 @@ app.post(`/bot${BOT_TOKEN}`, async (req, res) => {
       await answerCallbackQuery(callbackQuery.id, "Напоминание включено.");
       await sendMessage(
         chatId,
-        `✅ Напоминание включено для "${sub.className}". Первое сообщение: ${formatDate(
-          formatIsoDay(remindAt)
-        )} после ${REMINDER_HOUR}:00.`
+        `✅ Напоминание включено для "${sub.className}"`
       );
       return;
     }
@@ -306,9 +304,7 @@ app.post(`/bot${BOT_TOKEN}`, async (req, res) => {
     if (activeReminders.length > 0) {
       let remindersText = "✅ У вас уже включены уведомления:\n";
       activeReminders.forEach((reminder, i) => {
-        remindersText += `\n${i + 1}. ${reminder.className}\n- Напоминание: ${formatDate(
-          reminder.remindOnIso
-        )} после ${REMINDER_HOUR}:00`;
+        remindersText += `\n${i + 1}. ${reminder.className}`;
       });
       await sendMessage(chatId, remindersText);
     }
@@ -331,10 +327,10 @@ app.post(`/bot${BOT_TOKEN}`, async (req, res) => {
     await sendMessage(
       chatId,
       `🛠 *Поддержка*
-Если что-то не работает
-👤 Павел
-📱 @slemins
-Напишите сообщение и опишите проблему 🙌`,
+        Если что-то не работает
+        👤 Павел
+        📱 @slemins
+        Напишите сообщение и опишите проблему 🙌`,
       { parse_mode: "Markdown" }
     );
     return;
