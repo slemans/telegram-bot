@@ -155,7 +155,7 @@ function getInitialReminderDateTime(endDate, now = new Date()) {
   if (Number.isNaN(end.getTime())) return null;
 
   const firstReminder = new Date(end);
-  firstReminder.setDate(firstReminder.getDate() - 1);
+  firstReminder.setDate(firstReminder.getDate() - 2);
   firstReminder.setHours(REMINDER_HOUR, 0, 0, 0);
 
   if (now.getTime() <= firstReminder.getTime()) return firstReminder;
