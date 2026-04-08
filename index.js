@@ -135,6 +135,10 @@ function formatDate(dateString) {
   return new Date(dateString).toLocaleDateString("ru-RU");
 }
 
+function isValidPhoneInput(text) {
+  return /^\d{12}$/.test(text.trim());
+}
+
 function formatIsoDay(date) {
   return date.toISOString().slice(0, 10);
 }
@@ -241,7 +245,15 @@ app.post(`/bot${BOT_TOKEN}`, async (req, res) => {
   if (!text) return;
 
   if (text === "/start") {
-    await sendMessage(chatId, "Отправь номер телефона 📱");
+    await sendMessage(chatId, "Отправь номер телефона в формате 375295781758 (только цифры) 📱");
+    return;
+  }
+
+  if (!isValidPhoneInput(text)) {
+    await sendMessage(
+      chatId,
+      "❌ Некорректный номер.\nВведите номер только цифрами в формате: 375295781758"
+    );
     return;
   }
 
@@ -255,14 +267,12 @@ app.post(`/bot${BOT_TOKEN}`, async (req, res) => {
 
   const subs = await getSubscriptions(user.id);
 
-  let response = `✅ Клиент найден: ${user.name}`;
-
   if (subs.length === 0) {
-    response += "\n\n❌ Активных абонементов с остатком нет";
-    await sendMessage(chatId, response);
+    await sendMessage(chatId, "❌ Активных абонементов с остатком не найдено");
     return;
   }
 
+  let response = `✅ Клиент найден: ${user.name}`;
   response += "\n\n🎫 Активные абонементы:";
 
   subs.forEach((sub, i) => {
