@@ -14,7 +14,7 @@ const SUPABASE_URL = process.env.SUPABASE_URL;
 const SUPABASE_KEY = process.env.SUPABASE_ANON_KEY;
 
 // =======================
-// SUPABASE INIT
+// SUPABASE
 // =======================
 const supabase = createClient(SUPABASE_URL, SUPABASE_KEY);
 
@@ -24,22 +24,18 @@ console.log("🚀 Bot started");
 // TELEGRAM
 // =======================
 async function sendMessage(chatId, text, extra = {}) {
-  try {
-    await fetch(`https://api.telegram.org/bot${BOT_TOKEN}/sendMessage`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
-        chat_id: chatId,
-        text,
-        ...extra,
-      }),
-    });
-  } catch (e) {
-    console.error("sendMessage error:", e);
-  }
+  await fetch(`https://api.telegram.org/bot${BOT_TOKEN}/sendMessage`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      chat_id: chatId,
+      text,
+      ...extra,
+    }),
+  });
 }
 
-async function answerCallbackQuery(id, text) {
+async function answerCallbackQuery(id, text = "OK") {
   await fetch(`https://api.telegram.org/bot${BOT_TOKEN}/answerCallbackQuery`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
@@ -51,14 +47,17 @@ async function answerCallbackQuery(id, text) {
 }
 
 // =======================
-// MOYKLASS (без изменений)
+// MOYKCLASS API
 // =======================
 async function getToken() {
-  const res = await fetch("https://api.moyklass.com/v1/company/auth/getToken", {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ apiKey: MOYK_API_KEY }),
-  });
+  const res = await fetch(
+    "https://api.moyklass.com/v1/company/auth/getToken",
+    {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ apiKey: MOYK_API_KEY }),
+    }
+  );
 
   const data = await res.json();
   return data.accessToken;
@@ -83,56 +82,41 @@ async function findUserByPhone(phone) {
 }
 
 // =======================
-// SUPABASE HELPERS
+// 🔥 АБОНЕМЕНТЫ (ГЛАВНОЕ)
 // =======================
+async function getSubscriptions(userId) {
+  const token = await getToken();
 
-// сохранить reminder
-async function saveReminder(data) {
-  const { error } = await supabase.from("reminders").insert([data]);
-  if (error) console.error("Supabase insert error:", error);
-}
-
-// получить reminders
-async function getReminders() {
-  const { data, error } = await supabase
-    .from("reminders")
-    .select("*")
-    .eq("active", true);
-
-  if (error) {
-    console.error(error);
-    return [];
-  }
-
-  return data;
-}
-
-// отключить reminder
-async function disableReminder(id) {
-  await supabase.from("reminders").update({ active: false }).eq("id", id);
-}
-
-// =======================
-// CRON (каждую минуту)
-// =======================
-setInterval(async () => {
-  const reminders = await getReminders();
-  const now = new Date();
-
-  for (const r of reminders) {
-    const end = new Date(r.end_date);
-    const notifyAt = new Date(end);
-    notifyAt.setDate(notifyAt.getDate() - 2);
-    notifyAt.setHours(r.notify_hour, 0, 0, 0);
-
-    if (Math.abs(now - notifyAt) < 60000) {
-      await sendMessage(
-        r.chat_id,
-        `⏰ Абонемент "${r.class_name}" скоро закончится (${end.toLocaleDateString()})`
-      );
+  const res = await fetch(
+    `https://api.moyklass.com/v1/company/userSubscriptions?userId=${userId}&statusId=2&limit=100`,
+    {
+      headers: { "x-access-token": token },
     }
-  }
-}, 60000);
+  );
+
+  const data = await res.json();
+  const subs = data.subscriptions || [];
+
+  return subs
+    .map((s) => ({
+      id: s.id,
+      className: s.name || "Абонемент",
+      endDate: s.endDate,
+      visitCount: s.visitCount,
+      visitedCount: s.visitedCount,
+    }))
+    .filter((s) => {
+      if (s.visitCount == null) return true;
+      return (s.visitCount - (s.visitedCount || 0)) > 0;
+    });
+}
+
+// =======================
+// SUPABASE SAVE
+// =======================
+async function saveReminder(r) {
+  await supabase.from("reminders").insert([r]);
+}
 
 // =======================
 // WEBHOOK
@@ -142,45 +126,50 @@ app.post("/webhook", async (req, res) => {
 
   const update = req.body;
 
-  // ===== CALLBACKS =====
+  // ================= CALLBACK =================
   if (update.callback_query) {
     const q = update.callback_query;
     const chatId = q.message.chat.id;
     const data = q.data;
 
-    await answerCallbackQuery(q.id, "ok");
+    await answerCallbackQuery(q.id);
 
-    // включение reminder
     if (data.startsWith("reminder_yes")) {
       const subId = data.split(":")[1];
 
-      await sendMessage(chatId, "Выберите время: 10 / 14 / 20");
-
-      return;
+      await sendMessage(chatId, "Выберите время:", {
+        reply_markup: {
+          inline_keyboard: [
+            [
+              { text: "10:00", callback_data: `time_10:${subId}` },
+              { text: "14:00", callback_data: `time_14:${subId}` },
+              { text: "20:00", callback_data: `time_20:${subId}` },
+            ],
+          ],
+        },
+      });
     }
 
-    if (data.startsWith("reminder_time_")) {
-      const hour = Number(data.replace("reminder_time_", "").split(":")[0]);
-
+    if (data.startsWith("time_")) {
+      const hour = Number(data.split(":")[0].replace("time_", ""));
       const subId = data.split(":")[1];
 
       await saveReminder({
         chat_id: chatId,
         subscription_id: subId,
-        class_name: "Абонемент",
         notify_hour: hour,
-        end_date: new Date().toISOString(),
         active: true,
+        end_date: new Date().toISOString(),
+        class_name: "Абонемент",
       });
 
       await sendMessage(chatId, "✅ Напоминание включено");
-      return;
     }
 
     return;
   }
 
-  // ===== MESSAGE =====
+  // ================= MESSAGE =================
   const msg = update.message;
   if (!msg) return;
 
@@ -190,44 +179,60 @@ app.post("/webhook", async (req, res) => {
 
   // /start
   if (text === "/start") {
-    await sendMessage(
-      chatId,
-      "Нажмите кнопку и отправьте контакт",
-      {
-        reply_markup: {
-          keyboard: [
-            [{ text: "📱 Отправить контакт", request_contact: true }],
-          ],
-          resize_keyboard: true,
-        },
-      }
-    );
+    await sendMessage(chatId, "Отправьте контакт", {
+      reply_markup: {
+        keyboard: [
+          [{ text: "📱 Отправить контакт", request_contact: true }],
+        ],
+        resize_keyboard: true,
+      },
+    });
     return;
   }
 
-  // контакт
+  // CONTACT
   if (contact) {
     const phone = normalizePhone(contact.phone_number);
 
     const user = await findUserByPhone(phone);
 
     if (!user) {
-      await sendMessage(chatId, "Пользователь не найден");
+      await sendMessage(chatId, "❌ Пользователь не найден");
       return;
     }
 
-    await sendMessage(chatId, `Привет ${user.name}`);
+    const subs = await getSubscriptions(user.id);
 
-    await sendMessage(chatId, "Включить напоминание?", {
-      reply_markup: {
-        inline_keyboard: [
-          [
-            { text: "Да", callback_data: "reminder_yes:1" },
-            { text: "Нет", callback_data: "reminder_no:1" },
+    // ❌ НЕТ АБОНЕМЕНТОВ
+    if (!subs.length) {
+      await sendMessage(chatId, "❌ У клиента нет активных абонементов");
+      return;
+    }
+
+    // ✅ ЕСТЬ АБОНЕМЕНТЫ
+    for (const sub of subs) {
+      await sendMessage(
+        chatId,
+        `🎫 ${sub.className}\n📅 до: ${sub.endDate}`
+      );
+
+      await sendMessage(chatId, "Включить уведомления?", {
+        reply_markup: {
+          inline_keyboard: [
+            [
+              {
+                text: "🔔 Да",
+                callback_data: `reminder_yes:${sub.id}`,
+              },
+              {
+                text: "❌ Нет",
+                callback_data: `reminder_no:${sub.id}`,
+              },
+            ],
           ],
-        ],
-      },
-    });
+        },
+      });
+    }
 
     return;
   }
