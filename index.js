@@ -187,7 +187,13 @@ app.post("/webhook", async (req, res) => {
 
 // ================= CRON =================
 cron.schedule("0 * * * *", async () => {
-  const hour = new Date().getHours();
+  const hour = parseInt(
+    new Date().toLocaleString("en-US", {
+      timeZone: "Europe/Minsk",
+      hour: "2-digit",
+      hour12: false
+    })
+  );
   const date = new Date().toISOString().split("T")[0];
 
   const { data: subs } = await supabase
