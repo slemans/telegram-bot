@@ -80,19 +80,13 @@ app.post("/webhook", async (req, res) => {
         notify_enabled: true,
         notify_time: parseInt(time)
       })
-      .eq("subscription_id", subId);
+      .eq("external_id", subId);
 
     console.log("CALLBACK UPDATE:", error);
-
-    await supabase.from("subscriptions").update({
-      notify_enabled: true,
-      notify_time: parseInt(time)
-    }).eq("external_id", subId);
-
+    
     await send(q.message.chat.id, `🔔 Уведомления включены: ${time}:00`);
 
-    const msg = update.message;
-    if (!msg) return;
+    return;
   }
 
   const msg = update.message;
@@ -140,7 +134,7 @@ app.post("/webhook", async (req, res) => {
       Math.ceil((new Date(s.endDate) - new Date()) / 86400000)
     );
 
-    text += `  Осталось: ${left}\n`;
+    text += `  Осталось: ${left}\n посещений`;
     text += `  Действует до: ${new Date(s.endDate).toLocaleDateString("ru-RU")}\n\n`;
 
     buttons.push([
@@ -150,26 +144,18 @@ app.post("/webhook", async (req, res) => {
     ]);
 
     // сохраняем
-    await supabase.from("subscriptions").insert({
-      user_id: user.id,
-      external_id: s.id,
-      name: s.name,
-      end_date: s.endDate,
-      remaining: s.remaining,
-      active: true
-    });
     const { data, error } = await supabase
       .from("subscriptions")
       .upsert({
-        user_id: user.id,
         external_id: s.id,
+        chat_id: chatId,
         name: s.name,
         end_date: s.endDate,
         remaining: s.remaining,
         active: true
       });
     
-    console.log("SUPABASE INSERT:", data, error);
+    console.log("SUPABASE:", data, error);
   }
 
   await send(chatId, text, {
@@ -184,8 +170,10 @@ cron.schedule("0 * * * *", async () => {
 
   const { data: subs } = await supabase
     .from("subscriptions")
-    .select("*, users(*)")
-    .eq("active", true);
+    .select("*")
+    .eq("active", true)
+    .eq("notify_enabled", true)
+    .eq("notify_time", hour);
 
   if (!subs) return;
 
@@ -196,7 +184,7 @@ cron.schedule("0 * * * *", async () => {
     const { data: log } = await supabase
       .from("notifications_log")
       .select("*")
-      .eq("subscription_id", s.id)
+      .eq("subscription_id", s.external_id)
       .eq("sent_date", date)
       .eq("notify_time", hour)
       .maybeSingle();
