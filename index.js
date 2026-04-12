@@ -1,7 +1,7 @@
 import express from "express";
 import dns from "dns";
 
-dns.setDefaultResultOrder("ipv4first"); // 🔥 важно для Render + Telegram
+dns.setDefaultResultOrder("ipv4first");
 
 const app = express();
 app.use(express.json());
@@ -18,21 +18,15 @@ const reminderJobs = new Map();
 const availableSubscriptions = new Map();
 
 // =======================
-// SAFE TELEGRAM API
+// SAFE TELEGRAM REQUEST
 // =======================
-async function tgFetch(url, body) {
+async function tg(url, body) {
   try {
-    const controller = new AbortController();
-    const timeout = setTimeout(() => controller.abort(), 8000);
-
     const res = await fetch(url, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify(body),
-      signal: controller.signal
+      body: JSON.stringify(body)
     });
-
-    clearTimeout(timeout);
     return res;
   } catch (e) {
     console.log("Telegram error:", e.message);
@@ -41,7 +35,7 @@ async function tgFetch(url, body) {
 }
 
 async function sendMessage(chatId, text, extra = {}) {
-  return tgFetch(`https://api.telegram.org/bot${BOT_TOKEN}/sendMessage`, {
+  return tg(`https://api.telegram.org/bot${BOT_TOKEN}/sendMessage`, {
     chat_id: chatId,
     text,
     ...extra
@@ -49,7 +43,7 @@ async function sendMessage(chatId, text, extra = {}) {
 }
 
 async function answerCallbackQuery(id, text) {
-  return tgFetch(`https://api.telegram.org/bot${BOT_TOKEN}/answerCallbackQuery`, {
+  return tg(`https://api.telegram.org/bot${BOT_TOKEN}/answerCallbackQuery`, {
     callback_query_id: id,
     text
   });
@@ -82,7 +76,7 @@ async function findUser(phone) {
   );
 
   const data = await res.json();
-  return data.users?.[0] || null;
+  return data.users?.[0];
 }
 
 async function getSubscriptions(userId) {
@@ -105,7 +99,7 @@ function formatDate(d) {
   return new Date(d).toLocaleDateString("ru-RU");
 }
 
-function nextDayAt(hour) {
+function nextDay(hour) {
   const d = new Date();
   d.setDate(d.getDate() + 1);
   d.setHours(hour, 0, 0, 0);
@@ -127,7 +121,7 @@ setInterval(async () => {
       `⏰ Абонемент "${r.className}" скоро закончится (${formatDate(r.endDate)})`
     );
 
-    r.nextNotifyTs = nextDayAt(r.notifyHour || 10).getTime();
+    r.nextNotifyTs = nextDay(r.notifyHour || 10).getTime();
     reminderJobs.set(key, r);
   }
 }, 60 * 60 * 1000);
@@ -178,7 +172,7 @@ app.post(`/bot${BOT_TOKEN}`, async (req, res) => {
         className: sub.className,
         endDate: sub.endDate,
         notifyHour: hour,
-        nextNotifyTs: nextDayAt(hour).getTime(),
+        nextNotifyTs: nextDay(hour).getTime(),
         active: true
       });
 
@@ -250,6 +244,8 @@ app.post(`/bot${BOT_TOKEN}`, async (req, res) => {
   }
 });
 
+// =======================
+// SERVER START
 // =======================
 app.listen(PORT, () => {
   console.log("🚀 Bot started on port", PORT);
