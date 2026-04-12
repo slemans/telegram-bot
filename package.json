@@ -10,4 +10,7 @@
   "scripts": {
     "start": "node index.js"
   }
+  "dependencies": {
+    "mysql2": "^3.x.x"
+  }
 }
