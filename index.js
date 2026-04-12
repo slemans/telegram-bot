@@ -1,7 +1,7 @@
 import express from "express";
 import dns from "dns";
 
-dns.setDefaultResultOrder("ipv4first"); // 🔥 FIX Render + Telegram
+dns.setDefaultResultOrder("ipv4first"); // 🔥 важно для Render + Telegram
 
 const app = express();
 app.use(express.json());
@@ -9,7 +9,7 @@ app.use(express.json());
 const BOT_TOKEN = process.env.BOT_TOKEN;
 const MOYK_API_KEY = process.env.MOYK_API_KEY;
 
-const TIME_OPTIONS = [10, 14, 20];
+const PORT = process.env.PORT || 3000;
 
 // =======================
 // MEMORY STORAGE
@@ -18,7 +18,7 @@ const reminderJobs = new Map();
 const availableSubscriptions = new Map();
 
 // =======================
-// SAFE TELEGRAM REQUEST
+// SAFE TELEGRAM API
 // =======================
 async function tgFetch(url, body) {
   try {
@@ -33,16 +33,15 @@ async function tgFetch(url, body) {
     });
 
     clearTimeout(timeout);
-
     return res;
   } catch (e) {
-    console.log("❌ Telegram fetch error:", e.message);
+    console.log("Telegram error:", e.message);
     return null;
   }
 }
 
 async function sendMessage(chatId, text, extra = {}) {
-  await tgFetch(`https://api.telegram.org/bot${BOT_TOKEN}/sendMessage`, {
+  return tgFetch(`https://api.telegram.org/bot${BOT_TOKEN}/sendMessage`, {
     chat_id: chatId,
     text,
     ...extra
@@ -50,14 +49,14 @@ async function sendMessage(chatId, text, extra = {}) {
 }
 
 async function answerCallbackQuery(id, text) {
-  await tgFetch(`https://api.telegram.org/bot${BOT_TOKEN}/answerCallbackQuery`, {
+  return tgFetch(`https://api.telegram.org/bot${BOT_TOKEN}/answerCallbackQuery`, {
     callback_query_id: id,
     text
   });
 }
 
 // =======================
-// MOYK CLASS API
+// MOYK API
 // =======================
 async function getToken() {
   const res = await fetch("https://api.moyklass.com/v1/company/auth/getToken", {
@@ -74,14 +73,12 @@ function normalizePhone(phone) {
   return phone.replace(/\D/g, "");
 }
 
-async function findUserByPhone(phone) {
+async function findUser(phone) {
   const token = await getToken();
 
   const res = await fetch(
     `https://api.moyklass.com/v1/company/users?phone=${phone}&limit=1`,
-    {
-      headers: { "x-access-token": token }
-    }
+    { headers: { "x-access-token": token } }
   );
 
   const data = await res.json();
@@ -92,10 +89,8 @@ async function getSubscriptions(userId) {
   const token = await getToken();
 
   const res = await fetch(
-    `https://api.moyklass.com/v1/company/userSubscriptions?userId=${userId}&statusId=2&limit=100`,
-    {
-      headers: { "x-access-token": token }
-    }
+    `https://api.moyklass.com/v1/company/userSubscriptions?userId=${userId}&statusId=2&limit=50`,
+    { headers: { "x-access-token": token } }
   );
 
   const data = await res.json();
@@ -103,18 +98,14 @@ async function getSubscriptions(userId) {
 }
 
 // =======================
-// DATE HELPERS
+// HELPERS
 // =======================
 function formatDate(d) {
   if (!d) return "не указана";
   return new Date(d).toLocaleDateString("ru-RU");
 }
 
-function formatIso(date) {
-  return new Date(date).toISOString().slice(0, 10);
-}
-
-function getNextDayHour(hour) {
+function nextDayAt(hour) {
   const d = new Date();
   d.setDate(d.getDate() + 1);
   d.setHours(hour, 0, 0, 0);
@@ -136,7 +127,7 @@ setInterval(async () => {
       `⏰ Абонемент "${r.className}" скоро закончится (${formatDate(r.endDate)})`
     );
 
-    r.nextNotifyTs = getNextDayHour(r.notifyHour || 10).getTime();
+    r.nextNotifyTs = nextDayAt(r.notifyHour || 10).getTime();
     reminderJobs.set(key, r);
   }
 }, 60 * 60 * 1000);
@@ -158,14 +149,13 @@ app.post(`/bot${BOT_TOKEN}`, async (req, res) => {
     const key = `${chatId}:${id}`;
 
     const sub = availableSubscriptions.get(key);
-    const reminder = reminderJobs.get(key);
 
-    if (!sub && action !== "disable_yes") {
+    if (!sub) {
       return answerCallbackQuery(callback_query.id, "Не найдено");
     }
 
     if (action === "reminder_yes") {
-      await sendMessage(chatId, `Выберите время:`, {
+      await sendMessage(chatId, "Выберите время:", {
         reply_markup: {
           inline_keyboard: [
             [
@@ -188,12 +178,12 @@ app.post(`/bot${BOT_TOKEN}`, async (req, res) => {
         className: sub.className,
         endDate: sub.endDate,
         notifyHour: hour,
-        nextNotifyTs: getNextDayHour(hour).getTime(),
+        nextNotifyTs: nextDayAt(hour).getTime(),
         active: true
       });
 
-      await sendMessage(chatId, `✅ Установлено на ${hour}:00`);
-      return answerCallbackQuery(callback_query.id, "Готово");
+      await sendMessage(chatId, `✅ Уведомления установлены на ${hour}:00`);
+      return answerCallbackQuery(callback_query.id, "OK");
     }
 
     if (action === "reminder_no") {
@@ -212,31 +202,31 @@ app.post(`/bot${BOT_TOKEN}`, async (req, res) => {
   const contact = message.contact;
 
   if (text === "/start") {
-    await sendMessage(chatId, "Отправь контакт");
+    await sendMessage(chatId, "📱 Отправь контакт");
     return;
   }
 
   if (!contact) {
-    await sendMessage(chatId, "Нужен контакт");
+    await sendMessage(chatId, "❌ Нужен контакт");
     return;
   }
 
   const phone = normalizePhone(contact.phone_number);
-  const user = await findUserByPhone(phone);
+  const user = await findUser(phone);
 
   if (!user) {
-    await sendMessage(chatId, "Пользователь не найден");
+    await sendMessage(chatId, "❌ Пользователь не найден");
     return;
   }
 
   const subs = await getSubscriptions(user.id);
 
   if (!subs.length) {
-    await sendMessage(chatId, "Нет абонементов");
+    await sendMessage(chatId, "❌ Нет абонементов");
     return;
   }
 
-  await sendMessage(chatId, `Клиент: ${user.name}`);
+  await sendMessage(chatId, `👤 ${user.name}`);
 
   for (const s of subs) {
     const key = `${chatId}:${s.id}`;
@@ -247,7 +237,7 @@ app.post(`/bot${BOT_TOKEN}`, async (req, res) => {
       endDate: s.endDate
     });
 
-    await sendMessage(chatId, `Абонемент: ${s.name}`, {
+    await sendMessage(chatId, `🎫 ${s.name}`, {
       reply_markup: {
         inline_keyboard: [
           [
@@ -261,6 +251,6 @@ app.post(`/bot${BOT_TOKEN}`, async (req, res) => {
 });
 
 // =======================
-app.listen(3000, () => {
-  console.log("🚀 Bot started");
+app.listen(PORT, () => {
+  console.log("🚀 Bot started on port", PORT);
 });
