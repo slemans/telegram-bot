@@ -74,6 +74,16 @@ app.post("/webhook", async (req, res) => {
 
     const [_, subId, time] = q.data.split("_");
 
+    const { error } = await supabase
+      .from("subscriptions")
+      .update({
+        notify_enabled: true,
+        notify_time: parseInt(time)
+      })
+      .eq("subscription_id", subId);
+
+    console.log("CALLBACK UPDATE:", error);
+
     await supabase.from("subscriptions").update({
       notify_enabled: true,
       notify_time: parseInt(time)
@@ -81,7 +91,8 @@ app.post("/webhook", async (req, res) => {
 
     await send(q.message.chat.id, `🔔 Уведомления включены: ${time}:00`);
 
-    return;
+    const msg = update.message;
+    if (!msg) return;
   }
 
   const msg = update.message;
