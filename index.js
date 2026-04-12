@@ -1,42 +1,21 @@
 import express from "express";
-import mysql from "mysql2/promise";
-
-// =======================
-// CONFIG
-// =======================
-const BOT_TOKEN = process.env.BOT_TOKEN;
-const MOYK_API_KEY = process.env.MOYK_API_KEY;
+import { createClient } from "@supabase/supabase-js";
 
 const app = express();
 app.use(express.json());
 
-// =======================
-// DB INIT
-// =======================
-let db;
+const BOT_TOKEN = process.env.BOT_TOKEN;
+const MOYK_API_KEY = process.env.MOYK_API_KEY;
 
-async function initDB() {
-  try {
-    db = await mysql.createPool({
-      host: "vh114.hoster.by",
-      user: "autocutb_fraudancebot",
-      password: "icf.RCi{5Kzd",
-      database: "autocutb_fraudancebot",
-      waitForConnections: true,
-      connectionLimit: 5
-    });
+const SUPABASE_URL = process.env.SUPABASE_URL;
+const SUPABASE_KEY = process.env.SUPABASE_KEY;
 
-    await db.execute("SELECT 1");
-    console.log("✅ DB connected");
-  } catch (err) {
-    console.error("❌ DB ERROR:", err.message);
-  }
-}
+const supabase = createClient(SUPABASE_URL, SUPABASE_KEY);
 
-await initDB();
+const TIME_OPTIONS = [10, 14, 20];
 
 // =======================
-// TELEGRAM
+// Telegram
 // =======================
 async function sendMessage(chatId, text, extra = {}) {
   await fetch(`https://api.telegram.org/bot${BOT_TOKEN}/sendMessage`, {
@@ -62,7 +41,7 @@ async function answerCallbackQuery(id, text) {
 }
 
 // =======================
-// MOYKLASS
+// Moyklass API
 // =======================
 async function getToken() {
   const res = await fetch("https://api.moyklass.com/v1/company/auth/getToken", {
@@ -93,78 +72,64 @@ async function findUserByPhone(phone) {
   return data.users?.[0] || null;
 }
 
-// =======================
-// SUBSCRIPTIONS
-// =======================
 async function getSubscriptions(userId) {
   const token = await getToken();
 
   const res = await fetch(
-    `https://api.moyklass.com/v1/company/userSubscriptions?userId=${userId}&limit=100`,
+    `https://api.moyklass.com/v1/company/userSubscriptions?userId=${userId}&statusId=2&limit=100`,
     {
       headers: { "x-access-token": token }
     }
   );
 
   const data = await res.json();
-  const now = new Date();
-
-  return (data.subscriptions || [])
-    .map(sub => {
-      const end = new Date(sub.endDate);
-
-      if (end < now) return null;
-
-      let remaining = null;
-      if (sub.visitCount != null && sub.visitedCount != null) {
-        remaining = Math.max(0, sub.visitCount - sub.visitedCount);
-      }
-
-      return {
-        id: sub.id,
-        className: sub.name || "Абонемент",
-        endDate: sub.endDate,
-        remaining
-      };
-    })
-    .filter(Boolean);
+  return data.subscriptions || [];
 }
 
+// =======================
+// Supabase DB
+// =======================
+async function saveReminder(reminder) {
+  await supabase.from("reminders").upsert(reminder);
+}
+
+async function getReminders() {
+  const { data } = await supabase.from("reminders").select("*");
+  return data || [];
+}
+
+async function updateNextNotify(id, nextTs) {
+  await supabase
+    .from("reminders")
+    .update({ next_notify_ts: nextTs })
+    .eq("id", id);
+}
+
+async function disableReminder(chatId, subId) {
+  await supabase
+    .from("reminders")
+    .update({ active: false })
+    .eq("chat_id", chatId)
+    .eq("subscription_id", subId);
+}
+
+// =======================
+// Helpers
+// =======================
 function formatDate(date) {
+  if (!date) return "не указана";
   return new Date(date).toLocaleDateString("ru-RU");
 }
 
 // =======================
-// REMINDERS (DB)
+// REMINDERS ENGINE
 // =======================
-async function saveReminder(chatId, sub, hour, notifyTs) {
-  await db.execute(
-    `INSERT INTO reminders 
-    (chat_id, subscription_id, class_name, end_date, notify_hour, next_notify_ts, active)
-    VALUES (?, ?, ?, ?, ?, ?, true)
-    ON DUPLICATE KEY UPDATE
-    notify_hour = VALUES(notify_hour),
-    next_notify_ts = VALUES(next_notify_ts),
-    active = true`,
-    [chatId, sub.id, sub.className, sub.endDate, hour, notifyTs]
-  );
-}
-
-async function disableReminder(chatId, subId) {
-  await db.execute(
-    `UPDATE reminders SET active = false WHERE chat_id = ? AND subscription_id = ?`,
-    [chatId, subId]
-  );
-}
-
 async function processReminders() {
-  const [rows] = await db.execute(
-    `SELECT * FROM reminders WHERE active = true`
-  );
-
+  const reminders = await getReminders();
   const now = Date.now();
 
-  for (const r of rows) {
+  for (const r of reminders) {
+    if (!r.active) continue;
     if (now < r.next_notify_ts) continue;
 
     await sendMessage(
@@ -174,22 +139,15 @@ async function processReminders() {
 
     const next = new Date();
     next.setDate(next.getDate() + 1);
-    next.setHours(r.notify_hour, 0, 0, 0);
+    next.setHours(r.notify_hour || 10, 0, 0, 0);
 
-    await db.execute(
-      `UPDATE reminders SET next_notify_ts = ? WHERE id = ?`,
-      [next.getTime(), r.id]
-    );
+    await updateNextNotify(r.id, next.getTime());
   }
 }
 
-// =======================
-// CRON ENDPOINT
-// =======================
-app.get("/run-reminders", async (req, res) => {
-  await processReminders();
-  res.send("OK");
-});
+setInterval(() => {
+  processReminders().catch(console.error);
+}, 60 * 60 * 1000);
 
 // =======================
 // WEBHOOK
@@ -197,71 +155,84 @@ app.get("/run-reminders", async (req, res) => {
 app.post(`/bot${BOT_TOKEN}`, async (req, res) => {
   res.sendStatus(200);
 
-  const msg = req.body.message;
-  if (!msg) return;
+  const { message, callback_query } = req.body;
 
-  const chatId = msg.chat.id;
+  // ================= CALLBACK =================
+  if (callback_query) {
+    const chatId = callback_query.message.chat.id;
+    const data = callback_query.data;
 
-  if (msg.text === "/start") {
-    await sendMessage(
-      chatId,
-      "Отправь свой контакт 👇",
-      {
-        reply_markup: {
-          keyboard: [[{ text: "📱 Отправить контакт", request_contact: true }]],
-          resize_keyboard: true
-        }
+    const [action, subId] = data.split(":");
+
+    if (action === "disable") {
+      await disableReminder(chatId, subId);
+      await answerCallbackQuery(callback_query.id, "Отключено");
+      return;
+    }
+
+    return;
+  }
+
+  if (!message) return;
+
+  const chatId = message.chat.id;
+  const text = message.text;
+  const contact = message.contact;
+
+  // ================= START =================
+  if (text === "/start") {
+    await sendMessage(chatId, "Отправь контакт 📱", {
+      reply_markup: {
+        keyboard: [[{ text: "📲 Отправить контакт", request_contact: true }]],
+        resize_keyboard: true
       }
-    );
+    });
     return;
   }
 
-  if (!msg.contact) {
-    await sendMessage(chatId, "❌ Отправь контакт кнопкой");
+  // ================= CONTACT CHECK =================
+  if (!contact) {
+    await sendMessage(chatId, "Нужно отправить контакт кнопкой");
     return;
   }
 
-  if (msg.contact.user_id !== msg.from.id) {
-    await sendMessage(chatId, "❌ Только свой контакт");
-    return;
-  }
-
-  const phone = normalizePhone(msg.contact.phone_number);
+  const phone = normalizePhone(contact.phone_number);
   const user = await findUserByPhone(phone);
 
   if (!user) {
-    await sendMessage(chatId, "❌ Не найден");
+    await sendMessage(chatId, "Пользователь не найден");
     return;
   }
 
   const subs = await getSubscriptions(user.id);
 
   if (!subs.length) {
-    await sendMessage(chatId, "❌ Нет активных абонементов");
+    await sendMessage(chatId, "Нет активных абонементов");
     return;
   }
 
-  let text = `✅ Найден: ${user.name}\n\n`;
-
-  subs.forEach(s => {
-    text += `🎫 ${s.className}
-- Осталось: ${s.remaining ?? "безлимит"}
-- До: ${formatDate(s.endDate)}\n\n`;
-  });
-
-  await sendMessage(chatId, text);
+  await sendMessage(chatId, `✅ Найден: ${user.name}`);
 
   for (const sub of subs) {
+    const reminder = {
+      chat_id: chatId,
+      subscription_id: sub.id,
+      class_name: sub.name || "Абонемент",
+      end_date: sub.endDate,
+      notify_hour: 10,
+      next_notify_ts: Date.now() + 10000,
+      active: true
+    };
+
+    await saveReminder(reminder);
+
     await sendMessage(
       chatId,
-      `Включить напоминание для "${sub.className}"?`,
+      `📌 ${sub.name}\nДействует до: ${formatDate(sub.endDate)}\n\nВключить уведомления?`,
       {
         reply_markup: {
           inline_keyboard: [
-            [
-              { text: "Да", callback_data: `on:${sub.id}` },
-              { text: "Нет", callback_data: `off:${sub.id}` }
-            ]
+            [{ text: "❌ Отключить", callback_data: `disable:${sub.id}` }]
           ]
         }
       }
@@ -272,5 +243,5 @@ app.post(`/bot${BOT_TOKEN}`, async (req, res) => {
 // =======================
 const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => {
-  console.log("🚀 Server started");
+  console.log("Server started on port", PORT);
 });
