@@ -153,8 +153,6 @@ app.post("/webhook", async (req, res) => {
       end_date: s.endDate,
       remaining: s.remaining,
       active: true
-    }, {
-      onConflict: "external_id"
     })
     .select();
     
