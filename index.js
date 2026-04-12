@@ -1,134 +1,68 @@
 import express from "express";
 import { createClient } from "@supabase/supabase-js";
+import fetch from "node-fetch";
+import cron from "node-cron";
 
-// ================= ENV =================
-const BOT_TOKEN = process.env.BOT_TOKEN;
-const MOYK_API_KEY = process.env.MOYK_API_KEY;
-
-const SUPABASE_URL = process.env.SUPABASE_URL;
-const SUPABASE_KEY = process.env.SUPABASE_KEY;
-
-// ================= SAFETY CHECK =================
-const supabase =
-  SUPABASE_URL && SUPABASE_KEY
-    ? createClient(SUPABASE_URL, SUPABASE_KEY)
-    : null;
-
-// ================= APP =================
 const app = express();
 app.use(express.json());
 
+const BOT_TOKEN = process.env.BOT_TOKEN;
+const MOYK_API_KEY = process.env.MOYK_API_KEY;
+
+const supabase = createClient(
+  process.env.SUPABASE_URL,
+  process.env.SUPABASE_KEY
+);
+
 // ================= TELEGRAM =================
-async function sendMessage(chatId, text, extra = {}) {
-  try {
-    await fetch(`https://api.telegram.org/bot${BOT_TOKEN}/sendMessage`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
-        chat_id: chatId,
-        text,
-        ...extra,
-      }),
-    });
-  } catch (e) {
-    console.error("Telegram error:", e);
-  }
+async function send(chatId, text, extra = {}) {
+  await fetch(`https://api.telegram.org/bot${BOT_TOKEN}/sendMessage`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ chat_id: chatId, text, ...extra })
+  });
 }
 
-// ================= MOYKASS =================
+// ================= MOYK =================
 async function getToken() {
-  const res = await fetch(
-    "https://api.moyklass.com/v1/company/auth/getToken",
-    {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ apiKey: MOYK_API_KEY }),
-    }
-  );
+  const r = await fetch("https://api.moyklass.com/v1/company/auth/getToken", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ apiKey: MOYK_API_KEY })
+  });
 
-  const data = await res.json();
-  return data.accessToken;
-}
-
-function normalizePhone(phone) {
-  return phone.replace(/\D/g, "");
+  const d = await r.json();
+  return d.accessToken;
 }
 
 async function findUser(phone) {
   const token = await getToken();
 
-  const res = await fetch(
+  const r = await fetch(
     `https://api.moyklass.com/v1/company/users?phone=${phone}&limit=1`,
-    {
-      headers: { "x-access-token": token },
-    }
+    { headers: { "x-access-token": token } }
   );
 
-  const data = await res.json();
-  return data.users?.[0] || null;
+  const d = await r.json();
+  return d.users?.[0];
 }
 
 async function getSubs(userId) {
   const token = await getToken();
 
-  const res = await fetch(
+  const r = await fetch(
     `https://api.moyklass.com/v1/company/userSubscriptions?userId=${userId}&statusId=2`,
-    {
-      headers: { "x-access-token": token },
-    }
+    { headers: { "x-access-token": token } }
   );
 
-  const data = await res.json();
-  return data.subscriptions || [];
+  const d = await r.json();
+  return d.subscriptions || [];
 }
 
 // ================= HELPERS =================
-const daysLeft = (date) =>
-  Math.ceil((new Date(date) - new Date()) / (1000 * 60 * 60 * 24));
+const today = () => new Date().toISOString().split("T")[0];
 
-// ================= REMINDERS =================
-async function saveReminder(chatId, sub) {
-  if (!supabase) return;
-
-  try {
-    await supabase.from("reminders").upsert({
-      chat_id: chatId,
-      subscription_id: sub.id,
-      class_name: sub.name,
-      end_date: sub.endDate,
-      active: true,
-    });
-  } catch (e) {
-    console.error("Supabase insert error:", e);
-  }
-}
-
-// ================= CHECK NOTIFICATIONS =================
-async function checkNotifications() {
-  if (!supabase) return;
-
-  const { data } = await supabase
-    .from("reminders")
-    .select("*")
-    .eq("active", true);
-
-  if (!data) return;
-
-  for (const r of data) {
-    const left = daysLeft(r.end_date);
-
-    if (left > 3) continue;
-
-    await sendMessage(
-      r.chat_id,
-      `⏰ Абонемент "${r.class_name}" заканчивается через ${left} дн.`
-    );
-  }
-}
-
-setInterval(() => {
-  checkNotifications().catch(console.error);
-}, 60 * 60 * 1000);
+const hourNow = () => new Date().getHours();
 
 // ================= WEBHOOK =================
 app.post("/webhook", async (req, res) => {
@@ -141,52 +75,101 @@ app.post("/webhook", async (req, res) => {
 
   // START
   if (msg.text === "/start") {
-    return sendMessage(chatId, "📲 Отправьте контакт", {
+    return send(chatId, "📲 Отправьте контакт", {
       reply_markup: {
         keyboard: [[{ text: "📞 Отправить контакт", request_contact: true }]],
-        resize_keyboard: true,
-        one_time_keyboard: true,
-      },
+        resize_keyboard: true
+      }
     });
   }
 
-  // CONTACT ONLY
+  // CONTACT
   if (!msg.contact) return;
 
-  const phone = normalizePhone(msg.contact.phone_number);
+  const phone = msg.contact.phone_number.replace(/\D/g, "");
 
   const user = await findUser(phone);
-
-  if (!user) {
-    return sendMessage(chatId, "❌ Пользователь не найден");
-  }
+  if (!user) return send(chatId, "❌ Не найден");
 
   const subs = await getSubs(user.id);
 
-  if (!subs.length) {
-    return sendMessage(chatId, "❌ У вас нет активных абонементов");
-  }
+  let text = `✅ ${user.name}\n\n🎫 Абонементы:\n`;
 
-  let text = `✅ Клиент найден: ${user.name}\n\n🎫 Активные абонементы:\n`;
+  const buttons = [];
 
   for (const s of subs) {
-    text += `
-• ${s.name}
-- Осталось: ${s.visitCount ?? "?"}
-- Действует до: ${new Date(s.endDate).toLocaleDateString("ru-RU")}
-`;
+    text += `• ${s.name}\n`;
 
-    await saveReminder(chatId, s);
+    buttons.push([
+      { text: "🕙 10:00", callback_data: `t_${s.id}_10` },
+      { text: "🕑 14:00", callback_data: `t_${s.id}_14` },
+      { text: "🌙 20:00", callback_data: `t_${s.id}_20` }
+    ]);
   }
 
-  text += `\n🔔 Уведомления включены`;
-
-  await sendMessage(chatId, text);
+  await send(chatId, text, {
+    reply_markup: { inline_keyboard: buttons }
+  });
 });
 
-// ================= START =================
+// ================= CALLBACK =================
+app.post("/callback", async (req, res) => {
+  res.sendStatus(200);
+
+  const q = req.body.callback_query;
+  if (!q) return;
+
+  const [_, subId, time] = q.data.split("_");
+
+  await supabase.from("subscriptions").update({
+    notify_enabled: true,
+    notify_time: parseInt(time)
+  }).eq("external_id", subId);
+
+  await send(q.message.chat.id, `🔔 Уведомления включены: ${time}:00`);
+});
+
+// ================= CRON =================
+cron.schedule("0 * * * *", async () => {
+  const hour = hourNow();
+  const date = today();
+
+  const { data: subs } = await supabase
+    .from("subscriptions")
+    .select("*")
+    .eq("active", true)
+    .eq("notify_enabled", true)
+    .eq("notify_time", hour);
+
+  if (!subs) return;
+
+  for (const s of subs) {
+    const { data: log } = await supabase
+      .from("notifications_log")
+      .select("*")
+      .eq("subscription_id", s.id)
+      .eq("sent_date", date)
+      .eq("notify_time", hour)
+      .single();
+
+    if (log) continue;
+
+    const left = Math.ceil(
+      (new Date(s.end_date) - new Date()) / 86400000
+    );
+
+    await send(
+      s.chat_id,
+      `⏰ Напоминание\n${s.name}\nОсталось: ${left} дней`
+    );
+
+    await supabase.from("notifications_log").insert({
+      subscription_id: s.id,
+      sent_date: date,
+      notify_time: hour
+    });
+  }
+});
+
 const PORT = process.env.PORT || 3000;
-
-app.listen(PORT, () => {
-  console.log("🚀 Bot started on port", PORT);
-});
+app.listen(PORT, () => console.log("🚀 Bot started"));
