@@ -1,6 +1,5 @@
 import express from "express";
 import { createClient } from "@supabase/supabase-js";
-import fetch from "node-fetch";
 import cron from "node-cron";
 
 const app = express();
