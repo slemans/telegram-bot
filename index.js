@@ -140,7 +140,6 @@ app.post("/webhook", async (req, res) => {
       Math.ceil((new Date(s.endDate) - new Date()) / 86400000)
     );
 
-    text += `- ${s.name}\n`;
     text += `  Осталось: ${left}\n`;
     text += `  Действует до: ${new Date(s.endDate).toLocaleDateString("ru-RU")}\n\n`;
 
@@ -151,20 +150,22 @@ app.post("/webhook", async (req, res) => {
     ]);
 
     // сохраняем
-    await supabase.from("subscriptions").upsert({
+    await supabase.from("subscriptions").insert({
+      user_id: user.id,
       external_id: s.id,
-      chat_id: chatId,
       name: s.name,
       end_date: s.endDate,
+      remaining: s.remaining,
       active: true
     });
     const { data, error } = await supabase
       .from("subscriptions")
       .upsert({
-        chat_id: chatId,
-        subscription_id: s.id,
-        class_name: s.name,
+        user_id: user.id,
+        external_id: s.id,
+        name: s.name,
         end_date: s.endDate,
+        remaining: s.remaining,
         active: true
       });
     
@@ -183,21 +184,22 @@ cron.schedule("0 * * * *", async () => {
 
   const { data: subs } = await supabase
     .from("subscriptions")
-    .select("*")
-    .eq("active", true)
-    .eq("notify_enabled", true)
-    .eq("notify_time", hour);
+    .select("*, users(*)")
+    .eq("active", true);
 
   if (!subs) return;
 
   for (const s of subs) {
+    if (!s.users?.notify_enabled) continue;
+    if (s.users.notify_time !== hour) continue;
+
     const { data: log } = await supabase
       .from("notifications_log")
       .select("*")
-      .eq("subscription_id", s.external_id)
+      .eq("subscription_id", s.id)
       .eq("sent_date", date)
       .eq("notify_time", hour)
-      .single();
+      .maybeSingle();
 
     if (log) continue;
 
