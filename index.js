@@ -115,6 +115,25 @@ app.post("/webhook", async (req, res) => {
 
   if (!user) {
     return send(chatId, "❌ Пользователь не найден");
+  } else {
+    // ===== USERS SAVE =====
+    const { data: existingUser } = await supabase
+      .from("users")
+      .select("*")
+      .eq("chat_id", chatId)
+      .maybeSingle();
+    
+    if (!existingUser) {
+      const { error } = await supabase
+        .from("users")
+        .insert({
+          chat_id: chatId,
+          phone,
+          name: user.name
+        });
+    
+      console.log("USER INSERT:", error);
+    }
   }
 
   const subs = await getSubs(user.id);
@@ -206,7 +225,8 @@ cron.schedule("0 * * * *", async () => {
     await supabase.from("notifications_log").insert({
       subscription_id: s.external_id,
       sent_date: date,
-      notify_time: hour
+      notify_time: new Date().getHours()
+      // notify_time: hour
     });
   }
 });
