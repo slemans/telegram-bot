@@ -1,252 +1,145 @@
 import express from "express";
-import dns from "dns";
-
-dns.setDefaultResultOrder("ipv4first");
 
 const app = express();
 app.use(express.json());
 
+// =======================
+// ENV
+// =======================
 const BOT_TOKEN = process.env.BOT_TOKEN;
-const MOYK_API_KEY = process.env.MOYK_API_KEY;
-
-const PORT = process.env.PORT || 3000;
 
 // =======================
-// MEMORY STORAGE
+// Telegram API
 // =======================
-const reminderJobs = new Map();
-const availableSubscriptions = new Map();
-
-// =======================
-// SAFE TELEGRAM REQUEST
-// =======================
-async function tg(url, body) {
+async function sendMessage(chatId, text, extra = {}) {
   try {
-    const res = await fetch(url, {
+    await fetch(`https://api.telegram.org/bot${BOT_TOKEN}/sendMessage`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify(body)
+      body: JSON.stringify({
+        chat_id: chatId,
+        text,
+        ...extra,
+      }),
     });
-    return res;
   } catch (e) {
-    console.log("Telegram error:", e.message);
-    return null;
+    console.error("sendMessage error:", e);
   }
 }
 
-async function sendMessage(chatId, text, extra = {}) {
-  return tg(`https://api.telegram.org/bot${BOT_TOKEN}/sendMessage`, {
-    chat_id: chatId,
-    text,
-    ...extra
-  });
-}
-
-async function answerCallbackQuery(id, text) {
-  return tg(`https://api.telegram.org/bot${BOT_TOKEN}/answerCallbackQuery`, {
-    callback_query_id: id,
-    text
-  });
-}
-
-// =======================
-// MOYK API
-// =======================
-async function getToken() {
-  const res = await fetch("https://api.moyklass.com/v1/company/auth/getToken", {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ apiKey: MOYK_API_KEY })
-  });
-
-  const data = await res.json();
-  return data.accessToken;
-}
-
-function normalizePhone(phone) {
-  return phone.replace(/\D/g, "");
-}
-
-async function findUser(phone) {
-  const token = await getToken();
-
-  const res = await fetch(
-    `https://api.moyklass.com/v1/company/users?phone=${phone}&limit=1`,
-    { headers: { "x-access-token": token } }
-  );
-
-  const data = await res.json();
-  return data.users?.[0];
-}
-
-async function getSubscriptions(userId) {
-  const token = await getToken();
-
-  const res = await fetch(
-    `https://api.moyklass.com/v1/company/userSubscriptions?userId=${userId}&statusId=2&limit=50`,
-    { headers: { "x-access-token": token } }
-  );
-
-  const data = await res.json();
-  return data.subscriptions || [];
-}
-
-// =======================
-// HELPERS
-// =======================
-function formatDate(d) {
-  if (!d) return "не указана";
-  return new Date(d).toLocaleDateString("ru-RU");
-}
-
-function nextDay(hour) {
-  const d = new Date();
-  d.setDate(d.getDate() + 1);
-  d.setHours(hour, 0, 0, 0);
-  return d;
-}
-
-// =======================
-// REMINDER LOOP
-// =======================
-setInterval(async () => {
-  const now = Date.now();
-
-  for (const [key, r] of reminderJobs.entries()) {
-    if (!r.active) continue;
-    if (now < r.nextNotifyTs) continue;
-
-    await sendMessage(
-      r.chatId,
-      `⏰ Абонемент "${r.className}" скоро закончится (${formatDate(r.endDate)})`
-    );
-
-    r.nextNotifyTs = nextDay(r.notifyHour || 10).getTime();
-    reminderJobs.set(key, r);
+async function answerCallbackQuery(id, text = "") {
+  try {
+    await fetch(`https://api.telegram.org/bot${BOT_TOKEN}/answerCallbackQuery`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        callback_query_id: id,
+        text,
+      }),
+    });
+  } catch (e) {
+    console.error("callback error:", e);
   }
-}, 60 * 60 * 1000);
+}
 
 // =======================
-// WEBHOOK
+// /webhook
 // =======================
-app.post(`/bot${BOT_TOKEN}`, async (req, res) => {
+app.post("/webhook", async (req, res) => {
   res.sendStatus(200);
 
-  const { message, callback_query } = req.body;
+  const update = req.body;
 
-  // ================= CALLBACK =================
-  if (callback_query) {
-    const chatId = callback_query.message.chat.id;
-    const data = callback_query.data;
+  // =======================
+  // CALLBACK BUTTONS
+  // =======================
+  if (update.callback_query) {
+    const cb = update.callback_query;
+    const chatId = cb.message.chat.id;
+    const data = cb.data;
 
-    const [action, id] = data.split(":");
-    const key = `${chatId}:${id}`;
+    await answerCallbackQuery(cb.id);
 
-    const sub = availableSubscriptions.get(key);
-
-    if (!sub) {
-      return answerCallbackQuery(callback_query.id, "Не найдено");
-    }
-
-    if (action === "reminder_yes") {
+    if (data === "remind_yes") {
       await sendMessage(chatId, "Выберите время:", {
         reply_markup: {
           inline_keyboard: [
             [
-              { text: "10:00", callback_data: `set_10:${id}` },
-              { text: "14:00", callback_data: `set_14:${id}` },
-              { text: "20:00", callback_data: `set_20:${id}` }
-            ]
-          ]
-        }
+              { text: "10:00", callback_data: "time_10" },
+              { text: "14:00", callback_data: "time_14" },
+              { text: "20:00", callback_data: "time_20" },
+            ],
+          ],
+        },
       });
-
-      return answerCallbackQuery(callback_query.id, "OK");
     }
 
-    if (action.startsWith("set_")) {
-      const hour = Number(action.split("_")[1]);
-
-      reminderJobs.set(key, {
-        chatId,
-        className: sub.className,
-        endDate: sub.endDate,
-        notifyHour: hour,
-        nextNotifyTs: nextDay(hour).getTime(),
-        active: true
-      });
-
-      await sendMessage(chatId, `✅ Уведомления установлены на ${hour}:00`);
-      return answerCallbackQuery(callback_query.id, "OK");
-    }
-
-    if (action === "reminder_no") {
-      await sendMessage(chatId, "Ок, без уведомлений");
-      return answerCallbackQuery(callback_query.id, "OK");
+    if (data === "remind_no") {
+      await sendMessage(chatId, "Ок, без напоминаний.");
     }
 
     return;
   }
 
-  // ================= MESSAGE =================
+  // =======================
+  // MESSAGE
+  // =======================
+  const message = update.message;
   if (!message) return;
 
   const chatId = message.chat.id;
   const text = message.text;
-  const contact = message.contact;
 
+  // =======================
+  // START
+  // =======================
   if (text === "/start") {
-    await sendMessage(chatId, "📱 Отправь контакт");
-    return;
-  }
-
-  if (!contact) {
-    await sendMessage(chatId, "❌ Нужен контакт");
-    return;
-  }
-
-  const phone = normalizePhone(contact.phone_number);
-  const user = await findUser(phone);
-
-  if (!user) {
-    await sendMessage(chatId, "❌ Пользователь не найден");
-    return;
-  }
-
-  const subs = await getSubscriptions(user.id);
-
-  if (!subs.length) {
-    await sendMessage(chatId, "❌ Нет абонементов");
-    return;
-  }
-
-  await sendMessage(chatId, `👤 ${user.name}`);
-
-  for (const s of subs) {
-    const key = `${chatId}:${s.id}`;
-
-    availableSubscriptions.set(key, {
-      id: s.id,
-      className: s.name || "Без названия",
-      endDate: s.endDate
-    });
-
-    await sendMessage(chatId, `🎫 ${s.name}`, {
+    await sendMessage(chatId, "Привет! Нажми кнопку и отправь контакт 👇", {
       reply_markup: {
-        inline_keyboard: [
-          [
-            { text: "🔔 Напомнить", callback_data: `reminder_yes:${s.id}` },
-            { text: "❌ Нет", callback_data: `reminder_no:${s.id}` }
-          ]
-        ]
-      }
+        keyboard: [
+          [{ text: "📱 Поделиться контактом", request_contact: true }],
+        ],
+        resize_keyboard: true,
+        one_time_keyboard: true,
+      },
     });
+    return;
   }
+
+  // =======================
+  // CONTACT
+  // =======================
+  if (message.contact) {
+    const phone = message.contact.phone_number;
+
+    await sendMessage(
+      chatId,
+      `Спасибо! Ваш номер: ${phone}\nВключить напоминания?`,
+      {
+        reply_markup: {
+          inline_keyboard: [
+            [
+              { text: "Да", callback_data: "remind_yes" },
+              { text: "Нет", callback_data: "remind_no" },
+            ],
+          ],
+        },
+      }
+    );
+    return;
+  }
+
+  // =======================
+  // DEFAULT
+  // =======================
+  await sendMessage(chatId, "Используй /start");
 });
 
 // =======================
-// SERVER START
+// START SERVER (Render fix)
 // =======================
-app.listen(PORT, () => {
+const PORT = process.env.PORT || 3000;
+
+app.listen(PORT, "0.0.0.0", () => {
   console.log("🚀 Bot started on port", PORT);
 });
