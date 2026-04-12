@@ -1,5 +1,17 @@
 import express from "express";
 
+import mysql from "mysql2/promise";
+
+const db = await mysql.createConnection({
+  host: "vh114.hoster.by",
+  user: "autocutb_fraudancebot",
+  password: "icf.RCi{5Kzd",
+  database: "autocutb_fraudancebot"
+});
+
+const [rows] = await db.execute("SELECT 1");
+console.log(rows);
+
 const app = express();
 app.use(express.json());
 
