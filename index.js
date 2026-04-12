@@ -1,6 +1,5 @@
 import express from "express";
 import { createClient } from "@supabase/supabase-js";
-import cron from "node-cron";
 
 const app = express();
 app.use(express.json());
@@ -18,7 +17,11 @@ async function send(chatId, text, extra = {}) {
   await fetch(`https://api.telegram.org/bot${BOT_TOKEN}/sendMessage`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ chat_id: chatId, text, ...extra })
+    body: JSON.stringify({
+      chat_id: chatId,
+      text,
+      ...extra
+    })
   });
 }
 
@@ -58,52 +61,91 @@ async function getSubs(userId) {
   return d.subscriptions || [];
 }
 
-// ================= HELPERS =================
-const today = () => new Date().toISOString().split("T")[0];
-
-const hourNow = () => new Date().getHours();
-
-// ================= WEBHOOK =================
+// ================= WEBHOOK (ВСЁ СЮДА) =================
 app.post("/webhook", async (req, res) => {
   res.sendStatus(200);
 
-  const msg = req.body.message;
+  const update = req.body;
+
+  // ================= CALLBACK =================
+  if (update.callback_query) {
+    const q = update.callback_query;
+
+    const [_, subId, time] = q.data.split("_");
+
+    await supabase.from("subscriptions").update({
+      notify_enabled: true,
+      notify_time: parseInt(time)
+    }).eq("external_id", subId);
+
+    await send(q.message.chat.id, `🔔 Уведомления включены: ${time}:00`);
+
+    return;
+  }
+
+  const msg = update.message;
   if (!msg) return;
 
   const chatId = msg.chat.id;
 
-  // START
+  // ================= START =================
   if (msg.text === "/start") {
     return send(chatId, "📲 Отправьте контакт", {
       reply_markup: {
-        keyboard: [[{ text: "📞 Отправить контакт", request_contact: true }]],
+        keyboard: [
+          [{ text: "📞 Отправить контакт", request_contact: true }]
+        ],
         resize_keyboard: true
       }
     });
   }
 
-  // CONTACT
+  // ================= CONTACT =================
   if (!msg.contact) return;
 
   const phone = msg.contact.phone_number.replace(/\D/g, "");
 
   const user = await findUser(phone);
-  if (!user) return send(chatId, "❌ Не найден");
+
+  if (!user) {
+    return send(chatId, "❌ Пользователь не найден");
+  }
 
   const subs = await getSubs(user.id);
 
-  let text = `✅ ${user.name}\n\n🎫 Абонементы:\n`;
+  if (!subs.length) {
+    return send(chatId, "❌ Нет активных абонементов");
+  }
+
+  // ================= TEXT =================
+  let text = `✅ Клиент найден: ${user.name}\n\n🎫 Активные абонементы:\n\n`;
 
   const buttons = [];
 
   for (const s of subs) {
-    text += `• ${s.name}\n`;
+    const left = Math.max(
+      0,
+      Math.ceil((new Date(s.endDate) - new Date()) / 86400000)
+    );
+
+    text += `- ${s.name}\n`;
+    text += `  Осталось: ${left}\n`;
+    text += `  Действует до: ${new Date(s.endDate).toLocaleDateString("ru-RU")}\n\n`;
 
     buttons.push([
       { text: "🕙 10:00", callback_data: `t_${s.id}_10` },
       { text: "🕑 14:00", callback_data: `t_${s.id}_14` },
       { text: "🌙 20:00", callback_data: `t_${s.id}_20` }
     ]);
+
+    // сохраняем
+    await supabase.from("subscriptions").upsert({
+      external_id: s.id,
+      chat_id: chatId,
+      name: s.name,
+      end_date: s.endDate,
+      active: true
+    });
   }
 
   await send(chatId, text, {
@@ -111,27 +153,10 @@ app.post("/webhook", async (req, res) => {
   });
 });
 
-// ================= CALLBACK =================
-app.post("/callback", async (req, res) => {
-  res.sendStatus(200);
-
-  const q = req.body.callback_query;
-  if (!q) return;
-
-  const [_, subId, time] = q.data.split("_");
-
-  await supabase.from("subscriptions").update({
-    notify_enabled: true,
-    notify_time: parseInt(time)
-  }).eq("external_id", subId);
-
-  await send(q.message.chat.id, `🔔 Уведомления включены: ${time}:00`);
-});
-
 // ================= CRON =================
 cron.schedule("0 * * * *", async () => {
-  const hour = hourNow();
-  const date = today();
+  const hour = new Date().getHours();
+  const date = new Date().toISOString().split("T")[0];
 
   const { data: subs } = await supabase
     .from("subscriptions")
@@ -146,7 +171,7 @@ cron.schedule("0 * * * *", async () => {
     const { data: log } = await supabase
       .from("notifications_log")
       .select("*")
-      .eq("subscription_id", s.id)
+      .eq("subscription_id", s.external_id)
       .eq("sent_date", date)
       .eq("notify_time", hour)
       .single();
@@ -163,7 +188,7 @@ cron.schedule("0 * * * *", async () => {
     );
 
     await supabase.from("notifications_log").insert({
-      subscription_id: s.id,
+      subscription_id: s.external_id,
       sent_date: date,
       notify_time: hour
     });
