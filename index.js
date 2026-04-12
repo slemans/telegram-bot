@@ -154,6 +154,7 @@ app.post("/webhook", async (req, res) => {
         remaining: s.remaining,
         active: true
       });
+    .select();
     
     console.log("SUPABASE:", data, error);
   }
