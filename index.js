@@ -145,15 +145,17 @@ app.post("/webhook", async (req, res) => {
 
     // сохраняем
     const { data, error } = await supabase
-      .from("subscriptions")
-      .upsert({
-        external_id: s.id,
-        chat_id: chatId,
-        name: s.name,
-        end_date: s.endDate,
-        remaining: s.remaining,
-        active: true
-      });
+    .from("subscriptions")
+    .upsert({
+      external_id: s.id,
+      chat_id: chatId,
+      name: s.name,
+      end_date: s.endDate,
+      remaining: s.remaining,
+      active: true
+    }, {
+      onConflict: "external_id"
+    })
     .select();
     
     console.log("SUPABASE:", data, error);
