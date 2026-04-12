@@ -80,10 +80,11 @@ const { data, error } = await supabase
       notify_hour: 10,
       active: true
     }
-  ]);
+  ])
+  .select();
 
-console.log("SUPABASE DATA:", data);
-console.log("SUPABASE ERROR:", error);
+console.log("DATA:", data);
+console.log("ERROR:", error);
 
 // PORT
 const PORT = process.env.PORT || 3000;
