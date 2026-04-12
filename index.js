@@ -7,99 +7,233 @@ app.use(express.json());
 // =======================
 // ENV
 // =======================
-const SUPABASE_URL = process.env.SUPABASE_URL;
-const SUPABASE_ANON_KEY = process.env.SUPABASE_ANON_KEY;
 const BOT_TOKEN = process.env.BOT_TOKEN;
+const MOYK_API_KEY = process.env.MOYK_API_KEY;
+
+const SUPABASE_URL = process.env.SUPABASE_URL;
+const SUPABASE_KEY = process.env.SUPABASE_ANON_KEY;
 
 // =======================
-// DEBUG (очень важно на Render)
-// =======================
-console.log("SUPABASE_URL:", SUPABASE_URL);
-console.log("SUPABASE_KEY:", SUPABASE_ANON_KEY ? "OK" : "MISSING");
-
-// =======================
-// Supabase init
+// SAFE SUPABASE INIT
 // =======================
 let supabase = null;
 
-if (SUPABASE_URL && SUPABASE_ANON_KEY) {
-  supabase = createClient(SUPABASE_URL, SUPABASE_ANON_KEY);
+if (SUPABASE_URL && SUPABASE_KEY) {
+  supabase = createClient(SUPABASE_URL, SUPABASE_KEY);
+  console.log("✅ Supabase initialized");
 } else {
   console.log("❌ Supabase not initialized (ENV missing)");
 }
 
 // =======================
-// Telegram helper
+// MEMORY (fallback)
 // =======================
-async function sendMessage(chatId, text) {
-  if (!BOT_TOKEN) return;
+const reminderJobs = new Map();
+const availableSubscriptions = new Map();
 
+// =======================
+// TELEGRAM
+// =======================
+async function sendMessage(chatId, text, extra = {}) {
   await fetch(`https://api.telegram.org/bot${BOT_TOKEN}/sendMessage`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({
       chat_id: chatId,
+      text,
+      ...extra
+    })
+  });
+}
+
+async function answerCallbackQuery(id, text) {
+  await fetch(`https://api.telegram.org/bot${BOT_TOKEN}/answerCallbackQuery`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      callback_query_id: id,
       text
     })
   });
 }
 
 // =======================
-// Test Supabase route
+// MOYKASS
 // =======================
-app.get("/test-db", async (req, res) => {
-  if (!supabase) {
-    return res.status(500).json({ error: "Supabase not configured" });
-  }
+async function getToken() {
+  const res = await fetch(
+    "https://api.moyklass.com/v1/company/auth/getToken",
+    {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ apiKey: MOYK_API_KEY })
+    }
+  );
 
-  const { data, error } = await supabase.from("reminders").select("*");
+  const data = await res.json();
+  return data.accessToken;
+}
 
-  if (error) {
-    return res.status(500).json({ error });
-  }
+function normalizePhone(phone) {
+  return phone.replace(/\D/g, "");
+}
 
-  res.json({ data });
-});
+async function findUserByPhone(phone) {
+  const token = await getToken();
+
+  const res = await fetch(
+    `https://api.moyklass.com/v1/company/users?phone=${phone}&limit=1`,
+    {
+      headers: { "x-access-token": token }
+    }
+  );
+
+  const data = await res.json();
+  return data.users?.[0] || null;
+}
+
+async function getSubscriptions(userId) {
+  const token = await getToken();
+
+  const res = await fetch(
+    `https://api.moyklass.com/v1/company/userSubscriptions?userId=${userId}&statusId=2&limit=100`,
+    {
+      headers: { "x-access-token": token }
+    }
+  );
+
+  const data = await res.json();
+  return data.subscriptions || [];
+}
 
 // =======================
-// Telegram webhook
+// HELPERS
+// =======================
+function formatDate(d) {
+  if (!d) return "не указана";
+  return new Date(d).toLocaleDateString("ru-RU");
+}
+
+// =======================
+// WEBHOOK
 // =======================
 app.post(`/bot${BOT_TOKEN}`, async (req, res) => {
   res.sendStatus(200);
 
-  const message = req.body.message;
-  if (!message) return;
+  const msg = req.body.message;
+  const cb = req.body.callback_query;
 
-  const chatId = message.chat.id;
-  const text = message.text;
+  // =======================
+  // CALLBACKS
+  // =======================
+  if (cb) {
+    const chatId = cb.message.chat.id;
+    const data = cb.data;
 
+    await answerCallbackQuery(cb.id, "OK");
+
+    if (data === "ping") {
+      await sendMessage(chatId, "pong");
+    }
+
+    return;
+  }
+
+  if (!msg) return;
+
+  const chatId = msg.chat.id;
+  const text = msg.text;
+  const contact = msg.contact;
+
+  // =======================
+  // START
+  // =======================
   if (text === "/start") {
-    await sendMessage(chatId, "Бот работает ✅ Supabase подключен");
+    await sendMessage(
+      chatId,
+      "Отправь контакт кнопкой ниже",
+      {
+        reply_markup: {
+          keyboard: [
+            [{ text: "📱 Отправить контакт", request_contact: true }]
+          ],
+          resize_keyboard: true
+        }
+      }
+    );
     return;
   }
 
-  if (text === "/db") {
-    if (!supabase) {
-      await sendMessage(chatId, "❌ Supabase не подключен");
-      return;
-    }
-
-    const { data, error } = await supabase.from("reminders").select("*");
-
-    if (error) {
-      await sendMessage(chatId, "❌ Ошибка базы: " + error.message);
-      return;
-    }
-
-    await sendMessage(chatId, `📦 записей: ${data.length}`);
+  // =======================
+  // HELP
+  // =======================
+  if (text === "/help") {
+    await sendMessage(
+      chatId,
+      "📞 Поддержка: @admin"
+    );
     return;
   }
 
-  await sendMessage(chatId, "Напиши /start или /db");
+  // =======================
+  // CONTACT CHECK
+  // =======================
+  if (!contact) {
+    await sendMessage(chatId, "Отправь контакт через кнопку");
+    return;
+  }
+
+  const phone = normalizePhone(contact.phone_number || "");
+
+  const user = await findUserByPhone(phone);
+
+  if (!user) {
+    await sendMessage(chatId, "Пользователь не найден");
+    return;
+  }
+
+  const subs = await getSubscriptions(user.id);
+
+  if (!subs.length) {
+    await sendMessage(chatId, "Нет активных абонементов");
+    return;
+  }
+
+  let textMsg = `✅ ${user.name}\n\nАбонементы:\n`;
+
+  for (const s of subs) {
+    textMsg += `\n• ${s.mainClassId || "Без группы"}\n`;
+    textMsg += `  до: ${formatDate(s.endDate)}\n`;
+  }
+
+  await sendMessage(chatId, textMsg);
+
+  // save for reminders
+  for (const s of subs) {
+    const key = `${chatId}:${s.id}`;
+    availableSubscriptions.set(key, s);
+
+    await sendMessage(chatId,
+      `Включить напоминание для абонемента ${s.id}?`,
+      {
+        reply_markup: {
+          inline_keyboard: [
+            [
+              { text: "Да", callback_data: "ping" },
+              { text: "Нет", callback_data: "ping" }
+            ]
+          ]
+        }
+      }
+    );
+  }
 });
 
 // =======================
+// START SERVER
+// =======================
 const PORT = process.env.PORT || 3000;
+
 app.listen(PORT, () => {
   console.log("🚀 Server started on port", PORT);
 });
