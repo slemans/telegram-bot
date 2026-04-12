@@ -71,6 +71,20 @@ app.post(`/bot${BOT_TOKEN}`, async (req, res) => {
   }
 });
 
+const { data, error } = await supabase
+  .from("reminders")
+  .insert([
+    {
+      chat_id: 123,
+      class_name: "TEST",
+      notify_hour: 10,
+      active: true
+    }
+  ]);
+
+console.log("SUPABASE DATA:", data);
+console.log("SUPABASE ERROR:", error);
+
 // PORT
 const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => {
