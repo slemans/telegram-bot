@@ -238,6 +238,20 @@ app.post("/webhook", async (req, res) => {
   }
 });
 
+const { data, error } = await supabase
+  .from("reminders")
+  .insert([
+    {
+      chat_id: 123,
+      subscription_id: 1,
+      notify_hour: 10,
+      active: true,
+      class_name: "test"
+    }
+  ]);
+
+console.log(data, error);
+
 // =======================
 const PORT = process.env.PORT || 3000;
 app.listen(PORT);
