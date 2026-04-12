@@ -147,6 +147,17 @@ app.post("/webhook", async (req, res) => {
       end_date: s.endDate,
       active: true
     });
+    const { data, error } = await supabase
+      .from("subscriptions")
+      .upsert({
+        chat_id: chatId,
+        subscription_id: s.id,
+        class_name: s.name,
+        end_date: s.endDate,
+        active: true
+      });
+    
+    console.log("SUPABASE INSERT:", data, error);
   }
 
   await send(chatId, text, {
