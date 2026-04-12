@@ -1,31 +1,42 @@
 import express from "express";
-
 import mysql from "mysql2/promise";
 
-const db = await mysql.createConnection({
-  host: "vh114.hoster.by",
-  user: "autocutb_fraudancebot",
-  password: "icf.RCi{5Kzd",
-  database: "autocutb_fraudancebot"
-});
-
-const [rows] = await db.execute("SELECT 1");
-console.log(rows);
+// =======================
+// CONFIG
+// =======================
+const BOT_TOKEN = process.env.BOT_TOKEN;
+const MOYK_API_KEY = process.env.MOYK_API_KEY;
 
 const app = express();
 app.use(express.json());
 
-const BOT_TOKEN = process.env.BOT_TOKEN;
-const MOYK_API_KEY = process.env.MOYK_API_KEY;
-const TIME_OPTIONS = [10, 14, 20];
+// =======================
+// DB INIT
+// =======================
+let db;
 
-// In-memory state for reminders.
-// If app restarts, this state resets.
-const reminderJobs = new Map();
-const availableSubscriptions = new Map();
+async function initDB() {
+  try {
+    db = await mysql.createPool({
+      host: "vh114.hoster.by",
+      user: "autocutb_fraudancebot",
+      password: "icf.RCi{5Kzd",
+      database: "autocutb_fraudancebot",
+      waitForConnections: true,
+      connectionLimit: 5
+    });
+
+    await db.execute("SELECT 1");
+    console.log("✅ DB connected");
+  } catch (err) {
+    console.error("❌ DB ERROR:", err.message);
+  }
+}
+
+await initDB();
 
 // =======================
-// Telegram
+// TELEGRAM
 // =======================
 async function sendMessage(chatId, text, extra = {}) {
   await fetch(`https://api.telegram.org/bot${BOT_TOKEN}/sendMessage`, {
@@ -39,19 +50,19 @@ async function sendMessage(chatId, text, extra = {}) {
   });
 }
 
-async function answerCallbackQuery(callbackQueryId, text) {
+async function answerCallbackQuery(id, text) {
   await fetch(`https://api.telegram.org/bot${BOT_TOKEN}/answerCallbackQuery`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({
-      callback_query_id: callbackQueryId,
+      callback_query_id: id,
       text
     })
   });
 }
 
 // =======================
-// Moyklass API
+// MOYKLASS
 // =======================
 async function getToken() {
   const res = await fetch("https://api.moyklass.com/v1/company/auth/getToken", {
@@ -78,378 +89,188 @@ async function findUserByPhone(phone) {
     }
   );
 
-  if (!res.ok) return null;
   const data = await res.json();
   return data.users?.[0] || null;
 }
 
-async function getClassNameById(classId, token) {
-  if (!classId) return "Группа не указана";
-
-  const res = await fetch(`https://api.moyklass.com/v1/company/classes/${classId}`, {
-    headers: { "x-access-token": token }
-  });
-
-  if (!res.ok) return `Группа ${classId}`;
-  const data = await res.json();
-  return data.name || `Группа ${classId}`;
-}
-
 // =======================
-// Берем только активные абонементы (statusId = 2)
-// и считаем остаток посещений.
+// SUBSCRIPTIONS
 // =======================
 async function getSubscriptions(userId) {
   const token = await getToken();
 
   const res = await fetch(
-    `https://api.moyklass.com/v1/company/userSubscriptions?userId=${userId}&statusId=2&limit=100`,
+    `https://api.moyklass.com/v1/company/userSubscriptions?userId=${userId}&limit=100`,
     {
       headers: { "x-access-token": token }
     }
   );
 
-  if (!res.ok) return [];
   const data = await res.json();
-  const subs = data.subscriptions || [];
+  const now = new Date();
 
-  const preparedSubs = subs
+  return (data.subscriptions || [])
     .map(sub => {
-      let remaining = null;
+      const end = new Date(sub.endDate);
 
+      if (end < now) return null;
+
+      let remaining = null;
       if (sub.visitCount != null && sub.visitedCount != null) {
         remaining = Math.max(0, sub.visitCount - sub.visitedCount);
       }
 
       return {
         id: sub.id,
-        externalId: sub.externalId ?? null,
-        endDate: sub.endDate ?? null,
-        visitCount: sub.visitCount ?? null,
-        visitedCount: sub.visitedCount ?? null,
-        remaining,
-        statusId: sub.statusId,
-        mainClassId: sub.mainClassId ?? null
+        className: sub.name || "Абонемент",
+        endDate: sub.endDate,
+        remaining
       };
     })
-    .filter(sub => sub.remaining == null || sub.remaining > 0);
+    .filter(Boolean);
+}
 
-  return Promise.all(
-    preparedSubs.map(async sub => ({
-      ...sub,
-      className: await getClassNameById(sub.mainClassId, token)
-    }))
+function formatDate(date) {
+  return new Date(date).toLocaleDateString("ru-RU");
+}
+
+// =======================
+// REMINDERS (DB)
+// =======================
+async function saveReminder(chatId, sub, hour, notifyTs) {
+  await db.execute(
+    `INSERT INTO reminders 
+    (chat_id, subscription_id, class_name, end_date, notify_hour, next_notify_ts, active)
+    VALUES (?, ?, ?, ?, ?, ?, true)
+    ON DUPLICATE KEY UPDATE
+    notify_hour = VALUES(notify_hour),
+    next_notify_ts = VALUES(next_notify_ts),
+    active = true`,
+    [chatId, sub.id, sub.className, sub.endDate, hour, notifyTs]
   );
 }
 
-function formatDate(dateString) {
-  if (!dateString) return "не указана";
-  return new Date(dateString).toLocaleDateString("ru-RU");
+async function disableReminder(chatId, subId) {
+  await db.execute(
+    `UPDATE reminders SET active = false WHERE chat_id = ? AND subscription_id = ?`,
+    [chatId, subId]
+  );
 }
 
-function formatIsoDay(date) {
-  return date.toISOString().slice(0, 10);
-}
+async function processReminders() {
+  const [rows] = await db.execute(
+    `SELECT * FROM reminders WHERE active = true`
+  );
 
-function getNextDayAtHour(date, hour) {
-  const next = new Date(date);
-  next.setDate(next.getDate() + 1);
-  next.setHours(hour, 0, 0, 0);
-  return next;
-}
+  const now = Date.now();
 
-function getInitialReminderDateTimeByHour(endDate, notifyHour, now = new Date()) {
-  const end = new Date(endDate);
-  if (Number.isNaN(end.getTime())) return null;
-
-  const firstReminder = new Date(end);
-  firstReminder.setDate(firstReminder.getDate() - 2);
-  firstReminder.setHours(notifyHour, 0, 0, 0);
-
-  if (now.getTime() <= firstReminder.getTime()) return firstReminder;
-  return getNextDayAtHour(now, notifyHour);
-}
-
-async function processScheduledReminders() {
-  const now = new Date();
-
-  for (const [key, reminder] of reminderJobs.entries()) {
-    if (!reminder.active) continue;
-    if (now.getTime() < reminder.nextNotifyTs) continue;
-
-    const todayIso = formatIsoDay(now);
-    if (todayIso > reminder.endDateIso) {
-      reminderJobs.set(key, { ...reminder, active: false });
-      continue;
-    }
+  for (const r of rows) {
+    if (now < r.next_notify_ts) continue;
 
     await sendMessage(
-      reminder.chatId,
-      `⏰ Ваш абонемент "${reminder.className}" скоро закончится (${formatDate(
-        reminder.endDate
-      )}), не забудьте продлить.`
+      r.chat_id,
+      `⏰ Абонемент "${r.class_name}" заканчивается ${formatDate(r.end_date)}`
     );
 
-    await sendMessage(reminder.chatId, "Отключить уведомления по этому абонементу?", {
-      reply_markup: {
-        inline_keyboard: [
-          [
-            { text: "Да", callback_data: `disable_yes:${reminder.subscriptionId}` },
-            { text: "Нет", callback_data: `disable_no:${reminder.subscriptionId}` }
-          ]
-        ]
-      }
-    });
+    const next = new Date();
+    next.setDate(next.getDate() + 1);
+    next.setHours(r.notify_hour, 0, 0, 0);
 
-    const nextNotify = getNextDayAtHour(now, reminder.notifyHour ?? 10);
-    reminderJobs.set(key, {
-      ...reminder,
-      nextNotifyTs: nextNotify.getTime()
-    });
+    await db.execute(
+      `UPDATE reminders SET next_notify_ts = ? WHERE id = ?`,
+      [next.getTime(), r.id]
+    );
   }
 }
 
-setInterval(() => {
-  processScheduledReminders().catch(err => {
-    console.error("Failed to process reminders:", err);
-  });
-}, 60 * 60 * 1000);
+// =======================
+// CRON ENDPOINT
+// =======================
+app.get("/run-reminders", async (req, res) => {
+  await processReminders();
+  res.send("OK");
+});
 
 // =======================
-// Webhook
+// WEBHOOK
 // =======================
 app.post(`/bot${BOT_TOKEN}`, async (req, res) => {
   res.sendStatus(200);
 
-  const callbackQuery = req.body.callback_query;
-  if (callbackQuery) {
-    const chatId = callbackQuery.message?.chat?.id;
-    const callbackData = callbackQuery.data || "";
+  const msg = req.body.message;
+  if (!msg) return;
 
-    if (!chatId || !callbackData) {
-      await answerCallbackQuery(callbackQuery.id, "Некорректные данные.");
-      return;
-    }
+  const chatId = msg.chat.id;
 
-    const [action, subIdRaw] = callbackData.split(":");
-    const subId = Number.parseInt(subIdRaw, 10);
-    const subscriptionKey = `${chatId}:${subId}`;
-    const sub = availableSubscriptions.get(subscriptionKey);
-    const reminder = reminderJobs.get(subscriptionKey);
-
-    if (!sub && action !== "disable_yes" && action !== "disable_no") {
-      await answerCallbackQuery(callbackQuery.id, "Абонемент не найден.");
-      return;
-    }
-
-    if (action === "reminder_yes") {
-      await answerCallbackQuery(callbackQuery.id, "Выберите время уведомлений.");
-      await sendMessage(chatId, `Выберите время уведомлений для "${sub.className}":`, {
-        reply_markup: {
-          inline_keyboard: [
-            [
-              { text: "🌤 10 AM", callback_data: `reminder_time_10:${sub.id}` },
-              { text: "☀️ 2 PM", callback_data: `reminder_time_14:${sub.id}` },
-              { text: "🌙 8 PM", callback_data: `reminder_time_20:${sub.id}` }
-            ]
-          ]
-        }
-      });
-      return;
-    }
-
-    if (action === "reminder_no") {
-      reminderJobs.delete(subscriptionKey);
-      await answerCallbackQuery(callbackQuery.id, "Ок, без напоминания.");
-      await sendMessage(chatId, `Ок, для "${sub.className}" напоминание не включено.`);
-      return;
-    }
-
-    if (action.startsWith("reminder_time_")) {
-      const hourRaw = action.replace("reminder_time_", "");
-      const notifyHour = Number.parseInt(hourRaw, 10);
-      if (!TIME_OPTIONS.includes(notifyHour)) {
-        await answerCallbackQuery(callbackQuery.id, "Некорректное время.");
-        return;
-      }
-
-      const remindAt = getInitialReminderDateTimeByHour(sub.endDate, notifyHour);
-      if (!remindAt || sub.endDate == null) {
-        await answerCallbackQuery(callbackQuery.id, "Не удалось поставить напоминание.");
-        return;
-      }
-
-      const endDateIso = formatIsoDay(new Date(sub.endDate));
-      reminderJobs.set(subscriptionKey, {
-        chatId,
-        subscriptionId: sub.id,
-        className: sub.className,
-        endDate: sub.endDate,
-        endDateIso,
-        notifyHour,
-        remindOnIso: formatIsoDay(remindAt),
-        remindAtTs: remindAt.getTime(),
-        nextNotifyTs: remindAt.getTime(),
-        active: true
-      });
-
-      await answerCallbackQuery(callbackQuery.id, "Напоминание включено.");
-      await sendMessage(
-        chatId,
-        `✅ Напоминание включено для "${sub.className}". Время уведомлений: ${notifyHour}:00.`
-      );
-      return;
-    }
-
-    if (action === "disable_yes") {
-      if (reminder) {
-        reminderJobs.set(subscriptionKey, { ...reminder, active: false });
-        await answerCallbackQuery(callbackQuery.id, "Уведомления отключены.");
-        await sendMessage(chatId, `🔕 Уведомления для "${reminder.className}" отключены.`);
-        return;
-      }
-      await answerCallbackQuery(callbackQuery.id, "Уведомление уже отключено.");
-      return;
-    }
-
-    if (action === "disable_no") {
-      await answerCallbackQuery(callbackQuery.id, "Продолжим уведомления.");
-      await sendMessage(chatId, `👌 Продолжу уведомления для "${sub.className}" до окончания абонемента.`);
-      return;
-    }
-
-    await answerCallbackQuery(callbackQuery.id, "Неизвестная команда.");
-    return;
-  }
-
-  const message = req.body.message;
-  if (!message) return;
-
-  const chatId = message.chat.id;
-  const text = message.text;
-  const fromId = message.from?.id;
-  const contact = message.contact;
-
-  if (text === "/start") {
-    const activeReminders = [...reminderJobs.values()].filter(
-      reminder => reminder.chatId === chatId && reminder.active
-    );
-
-    if (activeReminders.length > 0) {
-      let remindersText = "✅ У вас уже включены уведомления:\n";
-      activeReminders.forEach((reminder, i) => {
-        remindersText += `\n${i + 1}. ${reminder.className}\n- Время: ${reminder.notifyHour ?? 10}:00`;
-      });
-      await sendMessage(chatId, remindersText);
-    }
-
+  if (msg.text === "/start") {
     await sendMessage(
       chatId,
-      "Нажмите кнопку ниже и отправьте свой контакт, чтобы проверить абонементы.",
+      "Отправь свой контакт 👇",
       {
         reply_markup: {
-          keyboard: [[{ text: "Поделиться контактом", request_contact: true }]],
-          resize_keyboard: true,
-          one_time_keyboard: true
+          keyboard: [[{ text: "📱 Отправить контакт", request_contact: true }]],
+          resize_keyboard: true
         }
       }
     );
     return;
   }
 
-  if (text === "/help") {
-    await sendMessage(
-      chatId,
-      `🛠 *Поддержка*
-        Если что-то не работает
-        👤 Павел
-        📱 @slemins
-        Напишите сообщение и опишите проблему 🙌`,
-      { parse_mode: "Markdown" }
-    );
+  if (!msg.contact) {
+    await sendMessage(chatId, "❌ Отправь контакт кнопкой");
     return;
   }
 
-  if (!contact) {
-    await sendMessage(
-      chatId,
-      "❌ Для проверки нужно отправить контакт кнопкой «Поделиться контактом»."
-    );
+  if (msg.contact.user_id !== msg.from.id) {
+    await sendMessage(chatId, "❌ Только свой контакт");
     return;
   }
 
-  if (!fromId || contact.user_id !== fromId) {
-    await sendMessage(chatId, "❌ Можно отправлять только свой контакт.");
-    return;
-  }
-
-  const phone = normalizePhone(contact.phone_number || "");
-  if (!phone) {
-    await sendMessage(chatId, "❌ Не удалось получить номер из контакта.");
-    return;
-  }
+  const phone = normalizePhone(msg.contact.phone_number);
   const user = await findUserByPhone(phone);
 
   if (!user) {
-    await sendMessage(chatId, "❌ Пользователь не найден");
+    await sendMessage(chatId, "❌ Не найден");
     return;
   }
 
   const subs = await getSubscriptions(user.id);
 
-  if (subs.length === 0) {
-    await sendMessage(chatId, "❌ Активных абонементов с остатком не найдено");
+  if (!subs.length) {
+    await sendMessage(chatId, "❌ Нет активных абонементов");
     return;
   }
 
-  let response = `✅ Клиент найден: ${user.name}`;
-  response += "\n\n🎫 Активные абонементы:";
+  let text = `✅ Найден: ${user.name}\n\n`;
 
-  subs.forEach((sub, i) => {
-    const remainingText =
-      sub.remaining == null
-        ? "безлимит"
-        : `${sub.remaining} (из ${sub.visitCount ?? "?"})`;
-
-    response += `
-${i + 1}. ${sub.className}
-- Осталось занятий: ${remainingText}
-- Действует до: ${formatDate(sub.endDate)}
-`;
+  subs.forEach(s => {
+    text += `🎫 ${s.className}
+- Осталось: ${s.remaining ?? "безлимит"}
+- До: ${formatDate(s.endDate)}\n\n`;
   });
 
-  await sendMessage(chatId, response);
+  await sendMessage(chatId, text);
 
   for (const sub of subs) {
-    const subscriptionKey = `${chatId}:${sub.id}`;
-    availableSubscriptions.set(subscriptionKey, sub);
-    const existingReminder = reminderJobs.get(subscriptionKey);
-
-    if (existingReminder && existingReminder.active) {
-      await sendMessage(
-        chatId,
-        `✅ Для "${sub.className}" уведомления уже включены (напоминание: ${formatDate(
-          existingReminder.remindOnIso
-        )} после ${existingReminder.notifyHour ?? 10}:00).`
-      );
-      continue;
-    }
-
-    await sendMessage(chatId, "Включить уведомления об окончании абонемента?", {
-      reply_markup: {
-        inline_keyboard: [
-          [
-            { text: "🔔 Да, включить", callback_data: `reminder_yes:${sub.id}` },
-            { text: "🙅 Нет, не нужно", callback_data: `reminder_no:${sub.id}` }
+    await sendMessage(
+      chatId,
+      `Включить напоминание для "${sub.className}"?`,
+      {
+        reply_markup: {
+          inline_keyboard: [
+            [
+              { text: "Да", callback_data: `on:${sub.id}` },
+              { text: "Нет", callback_data: `off:${sub.id}` }
+            ]
           ]
-        ]
+        }
       }
-    });
+    );
   }
 });
 
 // =======================
 const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => {
-  console.log("Server started on port", PORT);
+  console.log("🚀 Server started");
 });
