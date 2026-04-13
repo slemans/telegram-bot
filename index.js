@@ -187,6 +187,7 @@ app.post("/webhook", async (req, res) => {
 
 // ================= CRON =================
 cron.schedule("0 * * * *", async () => {
+  console.log("CRON TICK");
   const hour = parseInt(
     new Date().toLocaleString("en-US", {
       timeZone: "Europe/Minsk",
