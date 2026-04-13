@@ -187,8 +187,6 @@ app.post("/webhook", async (req, res) => {
 
 // ================= CRON =================
 cron.schedule("0 * * * *", async () => {
-  console.log("CRON TICK");
-
   const now = new Date();
   const hour = parseInt(
     now.toLocaleString("en-US", {
@@ -199,44 +197,68 @@ cron.schedule("0 * * * *", async () => {
   );
   
   const minute = now.getMinutes();
-  if (minute > 5) return;
+  console.log("CRON:", hour, minute);
+
+  if (minute > 10) return;
   
-  const date = new Date().toISOString().split("T")[0];
+  const today = new Date().toISOString().split("T")[0];
 
   const { data: subs } = await supabase
     .from("subscriptions")
     .select("*")
     .eq("active", true)
     .eq("notify_enabled", true)
-    // .eq("notify_time", hour);
+    .eq("notify_time", hour);
 
-  if (!subs) return;
+  if (!subs || subs.length === 0) {
+    console.log("Нет подписок для отправки");
+    return;
+  }
 
   for (const s of subs) {
+    const end = new Date(s.end_date);
+    const diffDays = Math.ceil((end - now) / 86400000);
+
+    if (diffDays !== 3) {
+      console.log("SKIP (не 3 дня):", s.external_id, diffDays);
+      continue;
+    }
+    
     const { data: log } = await supabase
       .from("notifications_log")
       .select("*")
       .eq("subscription_id", s.external_id)
-      .eq("sent_date", date)
+      .eq("sent_date", today)
       .eq("notify_time", hour)
       .maybeSingle();
 
-    if (log) continue;
-
-    const left = Math.ceil(
-      (new Date(s.end_date) - new Date()) / 86400000
-    );
+    if (log) {
+      console.log("SKIP (уже отправляли):", s.external_id);
+      continue;
+    }
 
     await send(
       s.chat_id,
-      `⏰ Напоминание\n${s.name}\nОсталось: ${left} дней`
+      `⏰ Напоминание\n${s.name}\nЗаканчивается через 3 дня`
     );
+    console.log("ОТПРАВЛЕНО:", s.external_id);
 
+    // ✅ лог
     await supabase.from("notifications_log").insert({
       subscription_id: s.external_id,
-      sent_date: date,
+      sent_date: today,
       notify_time: hour
     });
+
+    // ❗ если уже истёк → отключаем
+    if (diffDays <= 0) {
+      await supabase
+        .from("subscriptions")
+        .update({ notify_enabled: false, active: false })
+        .eq("external_id", s.external_id);
+
+      console.log("ОТКЛЮЧЕНО:", s.external_id);
+    }
   }
 });
 
