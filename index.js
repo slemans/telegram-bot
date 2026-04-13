@@ -188,13 +188,19 @@ app.post("/webhook", async (req, res) => {
 // ================= CRON =================
 cron.schedule("0 * * * *", async () => {
   console.log("CRON TICK");
+
+  const now = new Date();
   const hour = parseInt(
-    new Date().toLocaleString("en-US", {
+    now.toLocaleString("en-US", {
       timeZone: "Europe/Minsk",
       hour: "2-digit",
       hour12: false
     })
   );
+  
+  const minute = now.getMinutes();
+  if (minute > 5) return;
+  
   const date = new Date().toISOString().split("T")[0];
 
   const { data: subs } = await supabase
