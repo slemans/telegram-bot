@@ -202,7 +202,7 @@ cron.schedule("0 * * * *", async () => {
     .select("*")
     .eq("active", true)
     .eq("notify_enabled", true)
-    .eq("notify_time", hour);
+    // .eq("notify_time", hour);
 
   if (!subs) return;
 
