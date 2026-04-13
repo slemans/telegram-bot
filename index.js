@@ -206,9 +206,6 @@ cron.schedule("0 * * * *", async () => {
   if (!subs) return;
 
   for (const s of subs) {
-    if (!s.users?.notify_enabled) continue;
-    if (s.users.notify_time !== hour) continue;
-
     const { data: log } = await supabase
       .from("notifications_log")
       .select("*")
@@ -231,8 +228,7 @@ cron.schedule("0 * * * *", async () => {
     await supabase.from("notifications_log").insert({
       subscription_id: s.external_id,
       sent_date: date,
-      notify_time: new Date().getHours()
-      // notify_time: hour
+      notify_time: hour
     });
   }
 });
