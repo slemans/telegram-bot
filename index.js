@@ -186,8 +186,9 @@ app.post("/webhook", async (req, res) => {
 });
 
 // ================= CRON =================
-cron.schedule("0 * * * *", async () => {
+cron.schedule("* * * * *", async () => {
   const now = new Date();
+
   const hour = parseInt(
     now.toLocaleString("en-US", {
       timeZone: "Europe/Minsk",
@@ -195,12 +196,14 @@ cron.schedule("0 * * * *", async () => {
       hour12: false
     })
   );
-  
+
   const minute = now.getMinutes();
+
   console.log("CRON:", hour, minute);
 
+  // окно 10 минут (чтобы не пропускало после рестарта)
   if (minute > 10) return;
-  
+
   const today = new Date().toISOString().split("T")[0];
 
   const { data: subs } = await supabase
@@ -219,11 +222,13 @@ cron.schedule("0 * * * *", async () => {
     const end = new Date(s.end_date);
     const diffDays = Math.ceil((end - now) / 86400000);
 
+    // ❗ только за 3 дня
     if (diffDays !== 3) {
       console.log("SKIP (не 3 дня):", s.external_id, diffDays);
       continue;
     }
-    
+
+    // ❗ уже отправляли сегодня?
     const { data: log } = await supabase
       .from("notifications_log")
       .select("*")
@@ -237,10 +242,12 @@ cron.schedule("0 * * * *", async () => {
       continue;
     }
 
+    // ✅ отправка
     await send(
       s.chat_id,
       `⏰ Напоминание\n${s.name}\nЗаканчивается через 3 дня`
     );
+
     console.log("ОТПРАВЛЕНО:", s.external_id);
 
     // ✅ лог
