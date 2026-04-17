@@ -1,3 +1,5 @@
+console.log("SUPABASE_URL =", process.env.SUPABASE_URL);
+
 import 'dotenv/config';
 import express from "express";
 import { createClient } from "@supabase/supabase-js";
