@@ -1,10 +1,15 @@
-/** PM2: секреты только в /root/telegram-bot/.env (подхватывает dotenv в index.js) */
+const path = require("path");
+
+/** PM2: секреты в .env в корне репозитория (подхватывает dotenv в index.js) */
 module.exports = {
   apps: [
     {
-      name: "bot",
+      name: "telegram-bot",
       script: "index.js",
-      cwd: "/root/telegram-bot",
+      cwd: path.join(__dirname),
+      instances: 1,
+      autorestart: true,
+      max_memory_restart: "200M",
     },
   ],
 };
