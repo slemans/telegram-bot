@@ -73,6 +73,42 @@ async function getSubs(userId) {
   return d.subscriptions || [];
 }
 
+/** Склонение числительных: 1 занятие, 2 занятия, 5 занятий */
+function pluralRu(n, forms) {
+  const abs = Math.abs(n) % 100;
+  const n1 = abs % 10;
+  if (abs > 10 && abs < 20) return forms[2];
+  if (n1 > 1 && n1 < 5) return forms[1];
+  if (n1 === 1) return forms[0];
+  return forms[2];
+}
+
+function formatRemainingLessons(remaining) {
+  if (remaining == null || Number.isNaN(Number(remaining))) {
+    return "Осталось занятий: —";
+  }
+  const n = Math.max(0, Math.floor(Number(remaining)));
+  const w = pluralRu(n, ["занятие", "занятия", "занятий"]);
+  return `Осталось: ${n} ${w}`;
+}
+
+/** Название группы / занятия из ответа МойКласс (разные схемы полей) */
+function subscriptionGroupTitle(s) {
+  const fromNested =
+    s.lessonClass?.name ||
+    s.lessonClass?.title ||
+    s.group?.name ||
+    s.class?.name;
+  const flat =
+    s.lessonClassName ||
+    s.className ||
+    s.groupName ||
+    s.name;
+  return (typeof fromNested === "string" && fromNested) ||
+    (typeof flat === "string" && flat) ||
+    "—";
+}
+
 // ================= WEBHOOK (ВСЁ СЮДА) =================
 app.post("/webhook", async (req, res) => {
   res.sendStatus(200);
@@ -159,13 +195,12 @@ app.post("/webhook", async (req, res) => {
   const buttons = [];
 
   for (const s of subs) {
-    const left = Math.max(
-      0,
-      Math.ceil((new Date(s.endDate) - new Date()) / 86400000)
-    );
+   const groupTitle = subscriptionGroupTitle(s);
+    const until = new Date(s.endDate).toLocaleDateString("ru-RU");
 
-    text += `  Осталось: ${left}\n посещений`;
-    text += `  Действует до: ${new Date(s.endDate).toLocaleDateString("ru-RU")}\n\n`;
+    text += `📌 Название группы: ${groupTitle}\n`;
+    text += `   ${formatRemainingLessons(s.remaining)}\n`;
+    text += `   Действует до: ${until}\n\n`;
 
     buttons.push([
       { text: "🕙 10:00", callback_data: `t_${s.id}_10` },
