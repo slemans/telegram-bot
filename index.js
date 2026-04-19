@@ -41,6 +41,17 @@ async function send(chatId, text, extra = {}) {
   }
 }
 
+async function answerCallbackQuery(q, text) {
+  await fetch(`https://api.telegram.org/bot${BOT_TOKEN}/answerCallbackQuery`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      callback_query_id: q.id,
+      ...(text ? { text } : {})
+    })
+  });
+}
+
 // ================= MOYK =================
 async function getToken() {
   const r = await fetch("https://api.moyklass.com/v1/company/auth/getToken", {
@@ -237,6 +248,18 @@ function pluralRu(n, forms) {
   return forms[2];
 }
 
+/** «3 дня», «1 день» для текста напоминаний */
+function pluralRuDays(n) {
+  const abs = Math.abs(n) % 100;
+  const n1 = abs % 10;
+  let w;
+  if (abs > 10 && abs < 20) w = "дней";
+  else if (n1 === 1) w = "день";
+  else if (n1 > 1 && n1 < 5) w = "дня";
+  else w = "дней";
+  return `${n} ${w}`;
+}
+
 function pickRemainingVisits(s) {
   if (!s || typeof s !== "object") return null;
   const keys = [
@@ -369,20 +392,45 @@ app.post("/webhook", async (req, res) => {
   // ================= CALLBACK =================
   if (update.callback_query) {
     const q = update.callback_query;
+    const data = q.data || "";
 
-    const [_, subId, time] = q.data.split("_");
+    const cancelMatch = data.match(/^n_(.+)_off$/);
+    if (cancelMatch) {
+      const subId = cancelMatch[1];
+      const { error } = await supabase
+        .from("subscriptions")
+        .update({ notify_enabled: false })
+        .eq("external_id", subId);
 
-    const { error } = await supabase
-      .from("subscriptions")
-      .update({
-        notify_enabled: true,
-        notify_time: parseInt(time)
-      })
-      .eq("external_id", subId);
+      console.log("NOTIFY OFF:", subId, error);
+      await answerCallbackQuery(q, "Напоминания отключены");
+      await send(
+        q.message.chat.id,
+        "🔕 Напоминания по этому абонементу отключены."
+      );
+      return;
+    }
 
-    console.log("CALLBACK UPDATE:", error);
-    
-    await send(q.message.chat.id, `🔔 Уведомления включены: ${time}:00`);
+    const parts = data.split("_");
+    if (parts[0] === "t" && parts.length >= 3) {
+      const subId = parts[1];
+      const time = parts[2];
+
+      const { error } = await supabase
+        .from("subscriptions")
+        .update({
+          notify_enabled: true,
+          notify_time: parseInt(time, 10)
+        })
+        .eq("external_id", subId);
+
+      console.log("CALLBACK UPDATE:", error);
+
+      await answerCallbackQuery(q, `Включено: ${time}:00`);
+      await send(q.message.chat.id, `🔔 Уведомления включены: ${time}:00`);
+    } else {
+      await answerCallbackQuery(q);
+    }
 
     return;
   }
@@ -547,13 +595,21 @@ cron.schedule("* * * * *", async () => {
     const end = new Date(s.end_date);
     const diffDays = Math.ceil((end - now) / 86400000);
 
-    // ❗ только за 3 дня
-    if (diffDays !== 3) {
-      console.log("SKIP (не 3 дня):", s.external_id, diffDays);
+    if (diffDays <= 0) {
+      await supabase
+        .from("subscriptions")
+        .update({ notify_enabled: false, active: false })
+        .eq("external_id", s.external_id);
+      console.log("ИСТЁК:", s.external_id);
       continue;
     }
 
-    // ❗ уже отправляли сегодня?
+    // напоминания каждый день в выбранный час, если до окончания 1–3 дня
+    if (diffDays < 1 || diffDays > 3) {
+      console.log("SKIP (вне окна 1–3 дня):", s.external_id, diffDays);
+      continue;
+    }
+
     const { data: log } = await supabase
       .from("notifications_log")
       .select("*")
@@ -567,30 +623,29 @@ cron.schedule("* * * * *", async () => {
       continue;
     }
 
-    // ✅ отправка
-    await send(
-      s.chat_id,
-      `⏰ Напоминание\n${s.name}\nЗаканчивается через 3 дня`
-    );
+    const title = s.name || "Абонемент";
+    const body = `⏰ Напоминание\n${title}\nДо окончания абонемента: ${pluralRuDays(diffDays)}`;
 
-    console.log("ОТПРАВЛЕНО:", s.external_id);
+    await send(s.chat_id, body, {
+      reply_markup: {
+        inline_keyboard: [
+          [
+            {
+              text: "🔕 Отключить напоминания",
+              callback_data: `n_${s.external_id}_off`
+            }
+          ]
+        ]
+      }
+    });
 
-    // ✅ лог
+    console.log("ОТПРАВЛЕНО:", s.external_id, "diffDays=", diffDays);
+
     await supabase.from("notifications_log").insert({
       subscription_id: s.external_id,
       sent_date: today,
       notify_time: hour
     });
-
-    // ❗ если уже истёк → отключаем
-    if (diffDays <= 0) {
-      await supabase
-        .from("subscriptions")
-        .update({ notify_enabled: false, active: false })
-        .eq("external_id", s.external_id);
-
-      console.log("ОТКЛЮЧЕНО:", s.external_id);
-    }
   }
 });
 
