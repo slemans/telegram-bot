@@ -1,27 +1,24 @@
-console.log("SUPABASE_URL =", process.env.SUPABASE_URL);
-
-import 'dotenv/config';
+import "dotenv/config";
 import express from "express";
 import { createClient } from "@supabase/supabase-js";
 import * as cron from "node-cron";
 
+const SUPABASE_URL = process.env.SUPABASE_URL;
+const SUPABASE_KEY = process.env.SUPABASE_KEY;
+const BOT_TOKEN = process.env.BOT_TOKEN;
+const MOYK_API_KEY = process.env.MOYK_API_KEY;
+
+if (!SUPABASE_URL || !SUPABASE_KEY || !BOT_TOKEN || !MOYK_API_KEY) {
+  console.error(
+    "Задайте в .env: SUPABASE_URL, SUPABASE_KEY, BOT_TOKEN, MOYK_API_KEY"
+  );
+  process.exit(1);
+}
+
+const supabase = createClient(SUPABASE_URL, SUPABASE_KEY);
+
 const app = express();
 app.use(express.json());
-
-// const BOT_TOKEN = process.env.BOT_TOKEN;
-// const MOYK_API_KEY = process.env.MOYK_API_KEY;
-
-const SUPABASE_URL = "https://emosientjxzlqegbskuz.supabase.co";
-const SUPABASE_KEY = "sb_publishable_xW_e-6dRiY6oDkz4tmnPzw_Dqj37flw";
-const BOT_TOKEN = "8742140576:AAF5j0WL-suMGcL2hip8m-wDU6zpAa66sMI";
-const MOYK_API_KEY = "01S88L1J3fe5cZrX5YX1HUNlI1rMUDRtLkRgHNgKxJdcIC1Hqq8F";
-
-const supabase = createClient(
-  // process.env.SUPABASE_URL,
-  // process.env.SUPABASE_KEY
-  SUPABASE_URL,
-  SUPABASE_KEY
-);
 
 // ================= TELEGRAM =================
 async function send(chatId, text, extra = {}) {
@@ -279,5 +276,7 @@ cron.schedule("* * * * *", async () => {
   }
 });
 
-const PORT = process.env.PORT || 3000;
-app.listen(PORT, () => console.log("🚀 Bot started"));
+const PORT = Number(process.env.PORT) || 3000;
+app.listen(PORT, "0.0.0.0", () =>
+  console.log(`🚀 Bot started on http://0.0.0.0:${PORT}`)
+);
