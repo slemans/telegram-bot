@@ -20,6 +20,10 @@ const supabase = createClient(SUPABASE_URL, SUPABASE_KEY);
 const app = express();
 app.use(express.json());
 
+app.get("/health", (_req, res) => {
+  res.sendStatus(200);
+});
+
 // ================= TELEGRAM =================
 async function send(chatId, text, extra = {}) {
   await fetch(`https://api.telegram.org/bot${BOT_TOKEN}/sendMessage`, {
