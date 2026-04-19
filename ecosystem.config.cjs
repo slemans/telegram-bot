@@ -7,6 +7,7 @@ module.exports = {
       name: "telegram-bot",
       script: "index.js",
       cwd: path.join(__dirname),
+      exec_mode: "fork",
       instances: 1,
       autorestart: true,
       max_memory_restart: "200M",
