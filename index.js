@@ -169,39 +169,6 @@ async function fetchSubscriptionCatalogName(token, subscriptionId, cache) {
   return null;
 }
 
-
-/** Группа (Class) в МойКласс: GET /v1/company/classes/{classId} */
-async function fetchClassNameById(token, classId, cache) {
-  if (classId == null || classId === "") return null;
-  if (cache.has(`class:${classId}`)) return cache.get(`class:${classId}`);
-
-  const url = `https://api.moyklass.com/v1/company/classes/${encodeURIComponent(classId)}`;
-  const r = await fetch(url, { headers: { "x-access-token": token } });
-  if (!r.ok) {
-    cache.set(`class:${classId}`, null);
-    return null;
-  }
-  const d = await r.json();
-  const name = d.name ?? d.class?.name;
-  if (typeof name === "string" && name.trim()) {
-    const t = name.trim();
-    cache.set(`class:${classId}`, t);
-    return t;
-  }
-  cache.set(`class:${classId}`, null);
-  return null;
-}
-
-function lessonClassIdFrom(s) {
-  return (
-    s.lessonClassId ??
-    s.lesson_class_id ??
-    s.lessonClass?.id ??
-    s.classId ??
-    s.class_id
-  );
-}
-
 function subscriptionEndDate(s) {
   return s.endDate ?? s.end_date ?? s.dateEnd;
 }
@@ -282,24 +249,6 @@ function formatRemainingLessons(remaining) {
   const n = Math.max(0, Math.floor(Number(remaining)));
   const w = pluralRu(n, ["занятие", "занятия", "занятий"]);
   return `Осталось: ${n} ${w}`;
-}
-
-
-/** Название группы / занятия из ответа МойКласс (разные схемы полей) */
-function subscriptionGroupTitle(s) {
-  const fromNested =
-    s.lessonClass?.name ||
-    s.lessonClass?.title ||
-    s.group?.name ||
-    s.class?.name;
-  const flat =
-    s.lessonClassName ||
-    s.className ||
-    s.groupName ||
-    s.name;
-  return (typeof fromNested === "string" && fromNested) ||
-    (typeof flat === "string" && flat) ||
-    "—";
 }
 
 function pickGroupTitle(s) {
