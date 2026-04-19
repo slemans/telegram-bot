@@ -26,7 +26,7 @@ app.get("/health", (_req, res) => {
 
 // ================= TELEGRAM =================
 async function send(chatId, text, extra = {}) {
-  await fetch(`https://api.telegram.org/bot${BOT_TOKEN}/sendMessage`, {
+  const r = await fetch(`https://api.telegram.org/bot${BOT_TOKEN}/sendMessage`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({
@@ -35,6 +35,10 @@ async function send(chatId, text, extra = {}) {
       ...extra
     })
   });
+  const data = await r.json().catch(() => ({}));
+  if (!r.ok) {
+    console.error("Telegram sendMessage:", r.status, data);
+  }
 }
 
 // ================= MOYK =================
@@ -49,16 +53,44 @@ async function getToken() {
   return d.accessToken;
 }
 
-async function findUser(phone) {
+/** Варианты номера: Telegram даёт +7… / 8… / без кода — в МойКласс может быть иначе */
+function phoneLookupVariants(digits) {
+  const d = String(digits).replace(/\D/g, "");
+  const out = [];
+  const push = (x) => {
+    if (x && !out.includes(x)) out.push(x);
+  };
+  push(d);
+  if (d.length === 11 && d.startsWith("8")) push("7" + d.slice(1));
+  if (d.length === 11 && d.startsWith("7")) push(d.slice(1));
+  if (d.length === 10) {
+    push("7" + d);
+    push("8" + d);
+  }
+  // BY: 375XXXXXXXXX
+  if (d.length === 12 && d.startsWith("375")) {
+    push(d.slice(3));
+    push("8" + d.slice(3));
+  }
+  if (d.length === 9) {
+    push("375" + d);
+  }
+  return out;
+}
+
+async function findUser(phoneDigits) {
   const token = await getToken();
 
-  const r = await fetch(
-    `https://api.moyklass.com/v1/company/users?phone=${phone}&limit=1`,
-    { headers: { "x-access-token": token } }
-  );
-
-  const d = await r.json();
-  return d.users?.[0];
+  for (const phone of phoneLookupVariants(phoneDigits)) {
+    const r = await fetch(
+      `https://api.moyklass.com/v1/company/users?phone=${encodeURIComponent(phone)}&limit=1`,
+      { headers: { "x-access-token": token } }
+    );
+    const d = await r.json().catch(() => ({}));
+    const u = d.users?.[0];
+    if (u) return u;
+  }
+  return null;
 }
 
 async function getSubs(userId) {
@@ -69,7 +101,7 @@ async function getSubs(userId) {
     { headers: { "x-access-token": token } }
   );
 
-  const d = await r.json();
+  const d = await r.json().catch(() => ({}));
   return d.subscriptions || [];
 }
 
@@ -78,7 +110,8 @@ async function fetchUserSubscriptionDetail(token, subscriptionId) {
   const url = `https://api.moyklass.com/v1/company/userSubscriptions/${subscriptionId}`;
   const r = await fetch(url, { headers: { "x-access-token": token } });
   if (!r.ok) return null;
-  const d = await r.json();
+  const d = await r.json().catch(() => null);
+  if (!d || typeof d !== "object") return null;
   return d.userSubscription || d.subscription || d.data || d;
 }
 
@@ -100,6 +133,7 @@ function parseClassApiPayload(d) {
   return null;
 }
 
+/** Группа (Class): GET /v1/company/classes/{id} или список ?classId= (см. OpenAPI МойКласс) */
 async function fetchClassNameById(token, classId, cache) {
   if (classId == null || classId === "") return null;
   const n = Number(classId);
@@ -114,14 +148,14 @@ async function fetchClassNameById(token, classId, cache) {
   let r = await fetch(byPath, { headers });
   let name = null;
   if (r.ok) {
-    name = parseClassApiPayload(await r.json());
+    name = parseClassApiPayload(await r.json().catch(() => null));
   }
 
   if (!name) {
     const byQuery = `https://api.moyklass.com/v1/company/classes?classId=${encodeURIComponent(classId)}`;
     r = await fetch(byQuery, { headers });
     if (r.ok) {
-      name = parseClassApiPayload(await r.json());
+      name = parseClassApiPayload(await r.json().catch(() => null));
     }
   }
 
@@ -160,13 +194,33 @@ async function fetchSubscriptionCatalogName(token, subscriptionId, cache) {
     cache.set(key, null);
     return null;
   }
-  const name = parseSubscriptionCatalogPayload(await r.json());
+  const name = parseSubscriptionCatalogPayload(await r.json().catch(() => null));
   if (name) {
     cache.set(key, name);
     return name;
   }
   cache.set(key, null);
   return null;
+}
+
+/** Порядок: основная группа, затем все classIds из абонемента */
+function collectClassIds(merged) {
+  const out = [];
+  const seen = new Set();
+  const add = (id) => {
+    if (id == null || id === "") return;
+    const num = Number(id);
+    if (Number.isFinite(num) && num <= 0) return;
+    const k = String(id);
+    if (seen.has(k)) return;
+    seen.add(k);
+    out.push(id);
+  };
+  add(merged.mainClassId ?? merged.main_class_id);
+  if (Array.isArray(merged.classIds)) {
+    for (const cid of merged.classIds) add(cid);
+  }
+  return out;
 }
 
 function subscriptionEndDate(s) {
@@ -274,27 +328,6 @@ function pickGroupTitle(s) {
   return null;
 }
 
-/** Порядок: основная группа, затем все classIds из абонемента */
-function collectClassIds(merged) {
-  const out = [];
-  const seen = new Set();
-  const add = (id) => {
-    if (id == null || id === "") return;
-    const num = Number(id);
-    if (Number.isFinite(num) && num <= 0) return;
-    const k = String(id);
-    if (seen.has(k)) return;
-    seen.add(k);
-    out.push(id);
-  };
-  add(merged.mainClassId ?? merged.main_class_id);
-  if (Array.isArray(merged.classIds)) {
-    for (const cid of merged.classIds) add(cid);
-  }
-  return out;
-}
-
-
 async function resolveSubscriptionForDisplay(token, s, nameCache) {
   let merged = { ...s };
   const detail = await fetchUserSubscriptionDetail(token, s.id);
@@ -304,7 +337,7 @@ async function resolveSubscriptionForDisplay(token, s, nameCache) {
 
   const remaining = computeRemainingLessons(merged);
   let groupTitle = pickGroupTitle(merged);
-  
+
   if (!groupTitle) {
     for (const cid of collectClassIds(merged)) {
       groupTitle = await fetchClassNameById(token, cid, nameCache);
@@ -330,6 +363,7 @@ async function resolveSubscriptionForDisplay(token, s, nameCache) {
 app.post("/webhook", async (req, res) => {
   res.sendStatus(200);
 
+  try {
   const update = req.body;
 
   // ================= CALLBACK =================
@@ -407,8 +441,7 @@ app.post("/webhook", async (req, res) => {
   }
 
   const token = await getToken();
- const nameCache = new Map();
-
+  const nameCache = new Map();
 
   // ================= TEXT =================
   let text = `✅ Клиент найден: ${user.name}\n\n🎫 Активные абонементы:\n\n`;
@@ -425,7 +458,6 @@ app.post("/webhook", async (req, res) => {
     const endRaw = subscriptionEndDate(merged);
     const until = new Date(endRaw).toLocaleDateString("ru-RU");
 
-
     text += `📌 Название группы: ${groupTitle}\n`;
     text += `   ${formatRemainingLessons(remaining)}\n`;
     text += `   Действует до: ${until}\n\n`;
@@ -441,11 +473,9 @@ app.post("/webhook", async (req, res) => {
     const nameForDb =
       groupTitle !== "—" ? groupTitle : merged.name ?? null;
 
-
-    // сохраняем
     const { data, error } = await supabase
-    .from("subscriptions")
-    .upsert(
+      .from("subscriptions")
+      .upsert(
         {
           external_id: subId,
           chat_id: chatId,
@@ -458,14 +488,26 @@ app.post("/webhook", async (req, res) => {
           onConflict: "external_id"
         }
       )
-    .select();
-    
+      .select();
+
     console.log("SUPABASE:", data, error);
   }
 
   await send(chatId, text, {
     reply_markup: { inline_keyboard: buttons }
   });
+  } catch (err) {
+    console.error("WEBHOOK ERROR:", err);
+    const chatIdTry =
+      req.body?.message?.chat?.id ??
+      req.body?.callback_query?.message?.chat?.id;
+    if (chatIdTry) {
+      await send(
+        chatIdTry,
+        "⚠️ Не удалось обработать запрос. Попробуйте ещё раз или напишите администратору."
+      );
+    }
+  }
 });
 
 // ================= CRON =================
