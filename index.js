@@ -79,41 +79,59 @@ async function fetchUserSubscriptionDetail(token, subscriptionId) {
   const r = await fetch(url, { headers: { "x-access-token": token } });
   if (!r.ok) return null;
   const d = await r.json();
-  return d.userSubscription || d.subscription || d;
+  return d.userSubscription || d.subscription || d.data || d;
 }
 
-async function fetchLessonClassName(token, lessonClassId, cache) {
-  if (lessonClassId == null || lessonClassId === "") return null;
-  if (cache.has(lessonClassId)) return cache.get(lessonClassId);
+/** Группа (Class) в МойКласс: GET /v1/company/classes/{classId} */
+async function fetchClassNameById(token, classId, cache) {
+  if (classId == null || classId === "") return null;
+  if (cache.has(`class:${classId}`)) return cache.get(`class:${classId}`);
 
-  const id = encodeURIComponent(lessonClassId);
-  const urls = [
-    `https://api.moyklass.com/v1/company/lessonClasses/${id}`,
-    `https://api.moyklass.com/v1/company/lessonClass/${id}`
-  ];
-
-  for (const url of urls) {
-    const r = await fetch(url, { headers: { "x-access-token": token } });
-    if (!r.ok) continue;
-    const d = await r.json();
-    const lc =
-      d.lessonClass || d.lessonClasses?.[0] || d.data || d;
-    const name = lc?.name || lc?.title;
-    if (typeof name === "string" && name.trim()) {
-      cache.set(lessonClassId, name.trim());
-      return name.trim();
-    }
+  const url = `https://api.moyklass.com/v1/company/classes/${encodeURIComponent(classId)}`;
+  const r = await fetch(url, { headers: { "x-access-token": token } });
+  if (!r.ok) {
+    cache.set(`class:${classId}`, null);
+    return null;
   }
-
-  cache.set(lessonClassId, null);
+  const d = await r.json();
+  const name = d.name ?? d.class?.name;
+  if (typeof name === "string" && name.trim()) {
+    const t = name.trim();
+    cache.set(`class:${classId}`, t);
+    return t;
+  }
+  cache.set(`class:${classId}`, null);
   return null;
 }
 
-function lessonClassIdFrom(s) {
+/** Вид абонемента (тип): GET /v1/company/subscriptions/{id} — запасной вариант названия */
+async function fetchSubscriptionCatalogName(token, subscriptionId, cache) {
+  if (subscriptionId == null || subscriptionId === "") return null;
+  const key = `sub:${subscriptionId}`;
+  if (cache.has(key)) return cache.get(key);
+
+  const url = `https://api.moyklass.com/v1/company/subscriptions/${encodeURIComponent(subscriptionId)}`;
+  const r = await fetch(url, { headers: { "x-access-token": token } });
+  if (!r.ok) {
+    cache.set(key, null);
+    return null;
+  }
+  const d = await r.json();
+  const name = d.name ?? d.subscription?.name;
+  if (typeof name === "string" && name.trim()) {
+    const t = name.trim();
+    cache.set(key, t);
+    return t;
+  }
+  cache.set(key, null);
+  return null;
+}
+
+function mainClassIdFrom(s) {
   return (
+    s.mainClassId ??
+    s.main_class_id ??
     s.lessonClassId ??
-    s.lesson_class_id ??
-    s.lessonClass?.id ??
     s.classId ??
     s.class_id
   );
@@ -174,6 +192,24 @@ function pickRemainingVisits(s) {
   return null;
 }
 
+/** Официальная схема МойКласс: visitCount − списанные занятия (visitedCount / stats) */
+function computeRemainingLessons(s) {
+  if (!s || typeof s !== "object") return null;
+  const vc = s.visitCount;
+  if (vc == null || vc === "" || Number.isNaN(Number(vc))) {
+    return pickRemainingVisits(s);
+  }
+  const visitedRaw =
+    s.visitedCount ?? s.stats?.totalVisited ?? s.statTotalVisits;
+  if (visitedRaw == null || visitedRaw === "" || Number.isNaN(Number(visitedRaw))) {
+    return pickRemainingVisits(s);
+  }
+  return Math.max(
+    0,
+    Math.floor(Number(vc)) - Math.floor(Number(visitedRaw))
+  );
+}
+
 function formatRemainingLessons(remaining) {
   if (remaining == null || Number.isNaN(Number(remaining))) {
     return "Осталось занятий: —";
@@ -206,19 +242,36 @@ function pickGroupTitle(s) {
   return null;
 }
 
-async function resolveSubscriptionForDisplay(token, s, lessonClassCache) {
+async function resolveSubscriptionForDisplay(token, s, nameCache) {
   let merged = { ...s };
   const detail = await fetchUserSubscriptionDetail(token, s.id);
   if (detail && typeof detail === "object") {
     merged = { ...s, ...detail };
   }
 
-  const remaining = pickRemainingVisits(merged);
+  const remaining = computeRemainingLessons(merged);
   let groupTitle = pickGroupTitle(merged);
 
   if (!groupTitle) {
-    const lcId = lessonClassIdFrom(merged);
-    groupTitle = await fetchLessonClassName(token, lcId, lessonClassCache);
+    groupTitle = await fetchClassNameById(
+      token,
+      mainClassIdFrom(merged),
+      nameCache
+    );
+  }
+  if (!groupTitle && Array.isArray(merged.classIds) && merged.classIds.length) {
+    groupTitle = await fetchClassNameById(
+      token,
+      merged.classIds[0],
+      nameCache
+    );
+  }
+  if (!groupTitle) {
+    groupTitle = await fetchSubscriptionCatalogName(
+      token,
+      merged.subscriptionId,
+      nameCache
+    );
   }
 
   return {
@@ -309,7 +362,7 @@ app.post("/webhook", async (req, res) => {
   }
 
   const token = await getToken();
-  const lessonClassCache = new Map();
+  const nameCache = new Map();
 
   // ================= TEXT =================
   let text = `✅ Клиент найден: ${user.name}\n\n🎫 Активные абонементы:\n\n`;
@@ -320,7 +373,7 @@ app.post("/webhook", async (req, res) => {
     const { merged, remaining, groupTitle } = await resolveSubscriptionForDisplay(
       token,
       s,
-      lessonClassCache
+      nameCache
     );
 
     const endRaw = subscriptionEndDate(merged);
