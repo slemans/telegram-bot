@@ -82,6 +82,94 @@ async function fetchUserSubscriptionDetail(token, subscriptionId) {
   return d.userSubscription || d.subscription || d.data || d;
 }
 
+function parseClassApiPayload(d) {
+  if (d == null) return null;
+  if (Array.isArray(d)) {
+    const row = d[0];
+    if (row && typeof row.name === "string" && row.name.trim()) {
+      return row.name.trim();
+    }
+    return null;
+  }
+  if (typeof d.name === "string" && d.name.trim()) return d.name.trim();
+  if (typeof d.class?.name === "string" && d.class.name.trim()) {
+    return d.class.name.trim();
+  }
+  if (d.data != null) return parseClassApiPayload(d.data);
+  if (d.classes != null) return parseClassApiPayload(d.classes);
+  return null;
+}
+
+async function fetchClassNameById(token, classId, cache) {
+  if (classId == null || classId === "") return null;
+  const n = Number(classId);
+  if (Number.isFinite(n) && n <= 0) return null;
+
+  const cacheKey = `class:${classId}`;
+  if (cache.has(cacheKey)) return cache.get(cacheKey);
+
+  const headers = { "x-access-token": token };
+
+  const byPath = `https://api.moyklass.com/v1/company/classes/${encodeURIComponent(classId)}`;
+  let r = await fetch(byPath, { headers });
+  let name = null;
+  if (r.ok) {
+    name = parseClassApiPayload(await r.json());
+  }
+
+  if (!name) {
+    const byQuery = `https://api.moyklass.com/v1/company/classes?classId=${encodeURIComponent(classId)}`;
+    r = await fetch(byQuery, { headers });
+    if (r.ok) {
+      name = parseClassApiPayload(await r.json());
+    }
+  }
+
+  if (name) {
+    cache.set(cacheKey, name);
+    return name;
+  }
+  cache.set(cacheKey, null);
+  return null;
+}
+
+function parseSubscriptionCatalogPayload(d) {
+  if (d == null) return null;
+  const sub = d.subscription ?? d.data ?? d;
+  const name = sub?.name ?? sub?.title;
+  if (typeof name === "string" && name.trim()) return name.trim();
+  if (Array.isArray(sub) && sub[0]?.name) {
+    const n = sub[0].name;
+    if (typeof n === "string" && n.trim()) return n.trim();
+  }
+  return null;
+}
+
+/** Вид абонемента (каталог): GET /v1/company/subscriptions/{id} — если группа не пришла */
+async function fetchSubscriptionCatalogName(token, subscriptionId, cache) {
+  if (subscriptionId == null || subscriptionId === "") return null;
+  const n = Number(subscriptionId);
+  if (Number.isFinite(n) && n <= 0) return null;
+
+  const key = `sub:${subscriptionId}`;
+  if (cache.has(key)) return cache.get(key);
+
+  const url = `https://api.moyklass.com/v1/company/subscriptions/${encodeURIComponent(subscriptionId)}`;
+  const r = await fetch(url, { headers: { "x-access-token": token } });
+  if (!r.ok) {
+    cache.set(key, null);
+    return null;
+  }
+  const name = parseSubscriptionCatalogPayload(await r.json());
+  if (name) {
+    cache.set(key, name);
+    return name;
+  }
+  cache.set(key, null);
+  return null;
+}
+
+
 /** Группа (Class) в МойКласс: GET /v1/company/classes/{classId} */
 async function fetchClassNameById(token, classId, cache) {
   if (classId == null || classId === "") return null;
@@ -237,29 +325,42 @@ function pickGroupTitle(s) {
   return null;
 }
 
-async function resolveSubscriptionForDisplay(token, s, lessonClassCache) {
+/** Порядок: основная группа, затем все classIds из абонемента */
+function collectClassIds(merged) {
+  const out = [];
+  const seen = new Set();
+  const add = (id) => {
+    if (id == null || id === "") return;
+    const num = Number(id);
+    if (Number.isFinite(num) && num <= 0) return;
+    const k = String(id);
+    if (seen.has(k)) return;
+    seen.add(k);
+    out.push(id);
+  };
+  add(merged.mainClassId ?? merged.main_class_id);
+  if (Array.isArray(merged.classIds)) {
+    for (const cid of merged.classIds) add(cid);
+  }
+  return out;
+}
+
+
+async function resolveSubscriptionForDisplay(token, s, nameCache) {
   let merged = { ...s };
   const detail = await fetchUserSubscriptionDetail(token, s.id);
   if (detail && typeof detail === "object") {
     merged = { ...s, ...detail };
   }
 
-  const remaining = pickRemainingVisits(merged);
+  const remaining = computeRemainingLessons(merged);
   let groupTitle = pickGroupTitle(merged);
-
+  
   if (!groupTitle) {
-     groupTitle = await fetchClassNameById(
-      token,
-      mainClassIdFrom(merged),
-      nameCache
-    );
-  }
-  if (!groupTitle && Array.isArray(merged.classIds) && merged.classIds.length) {
-    groupTitle = await fetchClassNameById(
-      token,
-      merged.classIds[0],
-      nameCache
-    );
+    for (const cid of collectClassIds(merged)) {
+      groupTitle = await fetchClassNameById(token, cid, nameCache);
+      if (groupTitle) break;
+    }
   }
   if (!groupTitle) {
     groupTitle = await fetchSubscriptionCatalogName(
