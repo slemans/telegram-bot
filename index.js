@@ -73,6 +73,56 @@ async function getSubs(userId) {
   return d.subscriptions || [];
 }
 
+/** Полная карточка абонемента (список часто без остатка и названия группы) */
+async function fetchUserSubscriptionDetail(token, subscriptionId) {
+  const url = `https://api.moyklass.com/v1/company/userSubscriptions/${subscriptionId}`;
+  const r = await fetch(url, { headers: { "x-access-token": token } });
+  if (!r.ok) return null;
+  const d = await r.json();
+  return d.userSubscription || d.subscription || d;
+}
+
+async function fetchLessonClassName(token, lessonClassId, cache) {
+  if (lessonClassId == null || lessonClassId === "") return null;
+  if (cache.has(lessonClassId)) return cache.get(lessonClassId);
+
+  const id = encodeURIComponent(lessonClassId);
+  const urls = [
+    `https://api.moyklass.com/v1/company/lessonClasses/${id}`,
+    `https://api.moyklass.com/v1/company/lessonClass/${id}`
+  ];
+
+  for (const url of urls) {
+    const r = await fetch(url, { headers: { "x-access-token": token } });
+    if (!r.ok) continue;
+    const d = await r.json();
+    const lc =
+      d.lessonClass || d.lessonClasses?.[0] || d.data || d;
+    const name = lc?.name || lc?.title;
+    if (typeof name === "string" && name.trim()) {
+      cache.set(lessonClassId, name.trim());
+      return name.trim();
+    }
+  }
+
+  cache.set(lessonClassId, null);
+  return null;
+}
+
+function lessonClassIdFrom(s) {
+  return (
+    s.lessonClassId ??
+    s.lesson_class_id ??
+    s.lessonClass?.id ??
+    s.classId ??
+    s.class_id
+  );
+}
+
+function subscriptionEndDate(s) {
+  return s.endDate ?? s.end_date ?? s.dateEnd;
+}
+
 /** Склонение числительных: 1 занятие, 2 занятия, 5 занятий */
 function pluralRu(n, forms) {
   const abs = Math.abs(n) % 100;
@@ -83,6 +133,47 @@ function pluralRu(n, forms) {
   return forms[2];
 }
 
+function pickRemainingVisits(s) {
+  if (!s || typeof s !== "object") return null;
+  const keys = [
+    "remaining",
+    "remain",
+    "rest",
+    "visitsLeft",
+    "visitsRemaining",
+    "lessonsLeft",
+    "lessonLeft",
+    "remainingLessons",
+    "remainingVisits",
+    "visitCount",
+    "lessonsCount",
+    "lessonCount",
+    "count",
+    "balance",
+    "numberOfClasses",
+    "classesLeft",
+    "paidVisitsLeft",
+    "classesRemains",
+    "left"
+  ];
+  for (const k of keys) {
+    const v = s[k];
+    if (v != null && v !== "" && !Number.isNaN(Number(v))) {
+      return Math.max(0, Math.floor(Number(v)));
+    }
+  }
+  for (const k of Object.keys(s)) {
+    if (!/remain|left|visit|lesson|balance|class/i.test(k)) continue;
+    if (/end|date|price|time|created|updated|id$/i.test(k)) continue;
+    const v = s[k];
+    if (typeof v === "number" && Number.isFinite(v)) return Math.max(0, Math.floor(v));
+    if (typeof v === "string" && v !== "" && !Number.isNaN(Number(v))) {
+      return Math.max(0, Math.floor(Number(v)));
+    }
+  }
+  return null;
+}
+
 function formatRemainingLessons(remaining) {
   if (remaining == null || Number.isNaN(Number(remaining))) {
     return "Осталось занятий: —";
@@ -91,6 +182,7 @@ function formatRemainingLessons(remaining) {
   const w = pluralRu(n, ["занятие", "занятия", "занятий"]);
   return `Осталось: ${n} ${w}`;
 }
+
 
 /** Название группы / занятия из ответа МойКласс (разные схемы полей) */
 function subscriptionGroupTitle(s) {
@@ -107,6 +199,51 @@ function subscriptionGroupTitle(s) {
   return (typeof fromNested === "string" && fromNested) ||
     (typeof flat === "string" && flat) ||
     "—";
+}
+
+function pickGroupTitle(s) {
+  const candidates = [
+    s.lessonClass?.name,
+    s.lessonClass?.title,
+    s.subscriptionType?.name,
+    s.subscription?.name,
+    s.tariff?.name,
+    s.product?.name,
+    s.group?.name,
+    s.class?.name,
+    s.lessonClassName,
+    s.className,
+    s.groupName,
+    s.name,
+    s.title,
+    s.label
+  ];
+  for (const v of candidates) {
+    if (typeof v === "string" && v.trim()) return v.trim();
+  }
+  return null;
+}
+
+async function resolveSubscriptionForDisplay(token, s, lessonClassCache) {
+  let merged = { ...s };
+  const detail = await fetchUserSubscriptionDetail(token, s.id);
+  if (detail && typeof detail === "object") {
+    merged = { ...s, ...detail };
+  }
+
+  const remaining = pickRemainingVisits(merged);
+  let groupTitle = pickGroupTitle(merged);
+
+  if (!groupTitle) {
+    const lcId = lessonClassIdFrom(merged);
+    groupTitle = await fetchLessonClassName(token, lcId, lessonClassCache);
+  }
+
+  return {
+    merged,
+    remaining,
+    groupTitle: groupTitle || "—"
+  };
 }
 
 // ================= WEBHOOK (ВСЁ СЮДА) =================
@@ -189,38 +326,58 @@ app.post("/webhook", async (req, res) => {
     return send(chatId, "❌ Нет активных абонементов");
   }
 
+  const token = await getToken();
+  const lessonClassCache = new Map();
+
+
   // ================= TEXT =================
   let text = `✅ Клиент найден: ${user.name}\n\n🎫 Активные абонементы:\n\n`;
 
   const buttons = [];
 
   for (const s of subs) {
-   const groupTitle = subscriptionGroupTitle(s);
-    const until = new Date(s.endDate).toLocaleDateString("ru-RU");
+    const { merged, remaining, groupTitle } = await resolveSubscriptionForDisplay(
+      token,
+      s,
+      lessonClassCache
+    );
+
+    const endRaw = subscriptionEndDate(merged);
+    const until = new Date(endRaw).toLocaleDateString("ru-RU");
+
 
     text += `📌 Название группы: ${groupTitle}\n`;
-    text += `   ${formatRemainingLessons(s.remaining)}\n`;
+    text += `   ${formatRemainingLessons(remaining)}\n`;
     text += `   Действует до: ${until}\n\n`;
 
+    const subId = s.id;
+
     buttons.push([
-      { text: "🕙 10:00", callback_data: `t_${s.id}_10` },
-      { text: "🕑 14:00", callback_data: `t_${s.id}_14` },
-      { text: "🌙 20:00", callback_data: `t_${s.id}_20` }
+      { text: "🕙 10:00", callback_data: `t_${subId}_10` },
+      { text: "🕑 14:00", callback_data: `t_${subId}_14` },
+      { text: "🌙 20:00", callback_data: `t_${subId}_20` }
     ]);
+
+    const nameForDb =
+      groupTitle !== "—" ? groupTitle : merged.name ?? null;
+
 
     // сохраняем
     const { data, error } = await supabase
     .from("subscriptions")
-    .upsert({
-      external_id: s.id,
-      chat_id: chatId,
-      name: s.name,
-      end_date: s.endDate,
-      remaining: s.remaining,
-      active: true
-    }, {
-      onConflict: "external_id"
-    })
+    .upsert(
+        {
+          external_id: subId,
+          chat_id: chatId,
+          name: nameForDb,
+          end_date: endRaw,
+          remaining: remaining ?? pickRemainingVisits(merged),
+          active: true
+        },
+        {
+          onConflict: "external_id"
+        }
+      )
     .select();
     
     console.log("SUPABASE:", data, error);
