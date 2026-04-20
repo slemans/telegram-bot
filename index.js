@@ -260,6 +260,43 @@ function pluralRuDays(n) {
   return `${n} ${w}`;
 }
 
+/** Час и минута по Europe/Minsk (иначе на VPS в UTC minute и hour расходятся) */
+function getMinskClock(now = new Date()) {
+  const parts = new Intl.DateTimeFormat("en-GB", {
+    timeZone: "Europe/Minsk",
+    hour: "numeric",
+    minute: "numeric",
+    hour12: false
+  }).formatToParts(now);
+  const hour = parseInt(parts.find((p) => p.type === "hour")?.value ?? "0", 10);
+  const minute = parseInt(parts.find((p) => p.type === "minute")?.value ?? "0", 10);
+  return { hour, minute };
+}
+
+/** Сегодня YYYY-MM-DD по календарю Минска */
+function todayDateMinsk(now = new Date()) {
+  return new Intl.DateTimeFormat("en-CA", {
+    timeZone: "Europe/Minsk"
+  }).format(now);
+}
+
+function utcMidnightParts(yyyyMmDd) {
+  const [y, m, d] = String(yyyyMmDd)
+    .slice(0, 10)
+    .split("-")
+    .map((x) => parseInt(x, 10));
+  return Date.UTC(y, m - 1, d);
+}
+
+/** Сколько полных календарных дней от «сегодня» (Минск) до end_date (UTC-сутки по строке даты) */
+function daysUntilEndDateMinsk(endDateStr, now = new Date()) {
+  const end = String(endDateStr).slice(0, 10);
+  const todayStr = todayDateMinsk(now);
+  return Math.round(
+    (utcMidnightParts(end) - utcMidnightParts(todayStr)) / 86400000
+  );
+}
+
 function pickRemainingVisits(s) {
   if (!s || typeof s !== "object") return null;
   const keys = [
@@ -560,92 +597,101 @@ app.post("/webhook", async (req, res) => {
 
 // ================= CRON =================
 cron.schedule("* * * * *", async () => {
-  const now = new Date();
+  try {
+    const now = new Date();
+    const { hour, minute } = getMinskClock(now);
+    const today = todayDateMinsk(now);
 
-  const hour = parseInt(
-    now.toLocaleString("en-US", {
-      timeZone: "Europe/Minsk",
-      hour: "2-digit",
-      hour12: false
-    })
-  );
+    console.log("CRON Minsk:", hour, minute, "date", today);
 
-  const minute = now.getMinutes();
+    // первые 15 минут часа по Минску (после рестарта не пропустить слот)
+    if (minute > 14) return;
 
-  console.log("CRON:", hour, minute);
-
-  // окно 10 минут (чтобы не пропускало после рестарта)
-  if (minute > 10) return;
-
-  const today = new Date().toISOString().split("T")[0];
-
-  const { data: subs } = await supabase
-    .from("subscriptions")
-    .select("*")
-    .eq("active", true)
-    .eq("notify_enabled", true)
-    .eq("notify_time", hour);
-
-  if (!subs || subs.length === 0) {
-    console.log("Нет подписок для отправки");
-    return;
-  }
-
-  for (const s of subs) {
-    const end = new Date(s.end_date);
-    const diffDays = Math.ceil((end - now) / 86400000);
-
-    if (diffDays <= 0) {
-      await supabase
-        .from("subscriptions")
-        .update({ notify_enabled: false, active: false })
-        .eq("external_id", s.external_id);
-      console.log("ИСТЁК:", s.external_id);
-      continue;
-    }
-
-    // напоминания каждый день в выбранный час, если до окончания 1–3 дня
-    if (diffDays < 1 || diffDays > 3) {
-      console.log("SKIP (вне окна 1–3 дня):", s.external_id, diffDays);
-      continue;
-    }
-
-    const { data: log } = await supabase
-      .from("notifications_log")
+    const { data: subs, error: selErr } = await supabase
+      .from("subscriptions")
       .select("*")
-      .eq("subscription_id", s.external_id)
-      .eq("sent_date", today)
-      .eq("notify_time", hour)
-      .maybeSingle();
+      .eq("active", true)
+      .eq("notify_enabled", true)
+      .eq("notify_time", hour);
 
-    if (log) {
-      console.log("SKIP (уже отправляли):", s.external_id);
-      continue;
+    if (selErr) {
+      console.error("CRON select subscriptions:", selErr);
+      return;
     }
 
-    const title = s.name || "Абонемент";
-    const body = `⏰ Напоминание\n${title}\nДо окончания абонемента: ${pluralRuDays(diffDays)}`;
+    if (!subs || subs.length === 0) {
+      return;
+    }
 
-    await send(s.chat_id, body, {
-      reply_markup: {
-        inline_keyboard: [
-          [
-            {
-              text: "🔕 Отключить напоминания",
-              callback_data: `n_${s.external_id}_off`
-            }
-          ]
-        ]
+    console.log("CRON кандидатов:", subs.length, "notify_time=", hour);
+
+    for (const s of subs) {
+      const diffDays = daysUntilEndDateMinsk(s.end_date, now);
+
+      if (diffDays <= 0) {
+        await supabase
+          .from("subscriptions")
+          .update({ notify_enabled: false, active: false })
+          .eq("external_id", s.external_id);
+        console.log("ИСТЁК:", s.external_id);
+        continue;
       }
-    });
 
-    console.log("ОТПРАВЛЕНО:", s.external_id, "diffDays=", diffDays);
+      if (diffDays < 1 || diffDays > 3) {
+        console.log("SKIP (вне окна 1–3 дня):", s.external_id, diffDays);
+        continue;
+      }
 
-    await supabase.from("notifications_log").insert({
-      subscription_id: s.external_id,
-      sent_date: today,
-      notify_time: hour
-    });
+      const { data: log, error: logErr } = await supabase
+        .from("notifications_log")
+        .select("*")
+        .eq("subscription_id", s.external_id)
+        .eq("sent_date", today)
+        .eq("notify_time", hour)
+        .maybeSingle();
+
+      if (logErr) {
+        console.error("notifications_log select:", logErr);
+        continue;
+      }
+
+      if (log) {
+        console.log("SKIP (уже отправляли):", s.external_id);
+        continue;
+      }
+
+      const title = s.name || "Абонемент";
+      const body = `⏰ Напоминание\n${title}\nДо окончания абонемента: ${pluralRuDays(diffDays)}`;
+
+      await send(s.chat_id, body, {
+        reply_markup: {
+          inline_keyboard: [
+            [
+              {
+                text: "🔕 Отключить напоминания",
+                callback_data: `n_${s.external_id}_off`
+              }
+            ]
+          ]
+        }
+      });
+
+      console.log("ОТПРАВЛЕНО:", s.external_id, "diffDays=", diffDays);
+
+      const { error: insErr } = await supabase
+        .from("notifications_log")
+        .insert({
+          subscription_id: s.external_id,
+          sent_date: today,
+          notify_time: hour
+        });
+
+      if (insErr) {
+        console.error("notifications_log insert:", insErr, s.external_id);
+      }
+    }
+  } catch (e) {
+    console.error("CRON ERROR:", e);
   }
 });
 
