@@ -451,20 +451,61 @@ app.post("/webhook", async (req, res) => {
     const parts = data.split("_");
     if (parts[0] === "t" && parts.length >= 3) {
       const subId = parts[1];
-      const time = parts[2];
+      const selectedTime = parseInt(parts[2], 10);
+
+      if (Number.isNaN(selectedTime)) {
+        await answerCallbackQuery(q, "Некорректное время");
+        return;
+      }
+
+      const { data: current, error: currentErr } = await supabase
+        .from("subscriptions")
+        .select("notify_enabled, notify_time")
+        .eq("external_id", String(subId))
+        .maybeSingle();
+
+      if (currentErr) {
+        console.error("CALLBACK SELECT:", currentErr);
+        await answerCallbackQuery(q, "Ошибка, попробуйте позже");
+        return;
+      }
+
+      if (current?.notify_enabled && Number(current.notify_time) === selectedTime) {
+        await answerCallbackQuery(
+          q,
+          `Уведомление уже включено на ${selectedTime}:00`
+        );
+        return;
+      }
 
       const { error } = await supabase
         .from("subscriptions")
         .update({
           notify_enabled: true,
-          notify_time: parseInt(time, 10)
+          notify_time: selectedTime
         })
-        .eq("external_id", subId);
+        .eq("external_id", String(subId));
 
-      console.log("CALLBACK UPDATE:", error);
+      if (error) {
+        console.error("CALLBACK UPDATE:", error);
+        await answerCallbackQuery(q, "Не удалось сохранить время");
+        return;
+      }
 
-      await answerCallbackQuery(q, `Включено: ${time}:00`);
-      await send(q.message.chat.id, `🔔 Уведомления об окончании абонимента включено, будет отправлена за 3 дня до кончания в: ${time}:00`);
+      if (current?.notify_enabled && Number.isFinite(Number(current.notify_time))) {
+        const prevTime = Number(current.notify_time);
+        await answerCallbackQuery(q, `Время изменено: ${selectedTime}:00`);
+        await send(
+          q.message.chat.id,
+          `🔁 Время уведомления изменено: ${prevTime}:00 → ${selectedTime}:00`
+        );
+      } else {
+        await answerCallbackQuery(q, `Включено: ${selectedTime}:00`);
+        await send(
+          q.message.chat.id,
+          `🔔 Уведомления об окончании абонемента включены, отправка за 3 дня до окончания в: ${selectedTime}:00`
+        );
+      }
     } else {
       await answerCallbackQuery(q);
     }
