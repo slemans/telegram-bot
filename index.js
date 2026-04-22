@@ -554,7 +554,8 @@ app.post("/webhook", async (req, res) => {
     buttons.push([
       { text: "🕙 10:00", callback_data: `t_${subId}_10` },
       { text: "🕑 14:00", callback_data: `t_${subId}_14` },
-      { text: "🌙 20:00", callback_data: `t_${subId}_20` }
+      { text: "🌙 20:00", callback_data: `t_${subId}_20` },
+      { text: "🔕 Выкл", callback_data: `n_${subId}_off` }
     ]);
 
     const nameForDb =
@@ -606,6 +607,29 @@ cron.schedule("* * * * *", async () => {
 
     console.log("CRON Minsk:", hour, minute, "date", today);
 
+    // Авто-отключение завершённых абонементов выполняем каждую минуту:
+    // это не зависит от времени напоминания.
+    const { data: activeSubs, error: activeSelErr } = await supabase
+      .from("subscriptions")
+      .select("external_id, end_date")
+      .eq("active", true);
+
+    if (activeSelErr) {
+      dbLogError("subscriptions select active for expire check", activeSelErr);
+    } else if (activeSubs?.length) {
+      for (const s of activeSubs) {
+        const diffDays = daysUntilEndDateMinsk(s.end_date, now);
+        if (diffDays <= 0) {
+          const { error: expErr } = await supabase
+            .from("subscriptions")
+            .update({ notify_enabled: false, active: false })
+            .eq("external_id", s.external_id);
+          dbLogError(`subscriptions expire ${s.external_id}`, expErr);
+          if (!expErr) console.log("ИСТЁК (авто off):", s.external_id);
+        }
+      }
+    }
+
     // первые 15 минут часа по Минску (после рестарта не пропустить слот)
     if (minute > 14) return;
 
@@ -630,14 +654,7 @@ cron.schedule("* * * * *", async () => {
     for (const s of subs) {
       const diffDays = daysUntilEndDateMinsk(s.end_date, now);
 
-      if (diffDays <= 0) {
-        await supabase
-          .from("subscriptions")
-          .update({ notify_enabled: false, active: false })
-          .eq("external_id", s.external_id);
-        console.log("ИСТЁК:", s.external_id);
-        continue;
-      }
+      if (diffDays <= 0) continue;
 
       if (diffDays < 1 || diffDays > 3) {
         console.log("SKIP (вне окна 1–3 дня):", s.external_id, diffDays);
@@ -649,7 +666,6 @@ cron.schedule("* * * * *", async () => {
         .select("*")
         .eq("subscription_id", s.external_id)
         .eq("sent_date", today)
-        .eq("notify_time", hour)
         .maybeSingle();
 
       if (logErr) {
@@ -682,11 +698,11 @@ cron.schedule("* * * * *", async () => {
 
       const { error: insErr } = await supabase
         .from("notifications_log")
-        .insert({
+        .upsert({
           subscription_id: s.external_id,
           sent_date: today,
           notify_time: hour
-        });
+        }, { onConflict: "subscription_id,sent_date" });
 
       if (insErr) {
         console.error("notifications_log insert:", insErr, s.external_id);
