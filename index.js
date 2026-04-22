@@ -358,11 +358,11 @@ function computeRemainingLessons(s) {
 
 function formatRemainingLessons(remaining) {
   if (remaining == null || Number.isNaN(Number(remaining))) {
-    return "Осталось занятий: —";
+    return "У вас осталось занятий в этом абонементе: —";
   }
   const n = Math.max(0, Math.floor(Number(remaining)));
   const w = pluralRu(n, ["занятие", "занятия", "занятий"]);
-  return `Осталось: ${n} ${w}`;
+  return `У вас осталось в этом абонементе: ${n} ${w}`;
 }
 
 function pickGroupTitle(s) {
@@ -464,7 +464,7 @@ app.post("/webhook", async (req, res) => {
       console.log("CALLBACK UPDATE:", error);
 
       await answerCallbackQuery(q, `Включено: ${time}:00`);
-      await send(q.message.chat.id, `🔔 Уведомления включены: ${time}:00`);
+      await send(q.message.chat.id, `🔔 Уведомления об окончании абонимента включено, будет отправлена за 3 дня до кончания в: ${time}:00`);
     } else {
       await answerCallbackQuery(q);
     }
@@ -479,10 +479,10 @@ app.post("/webhook", async (req, res) => {
 
   // ================= START =================
   if (msg.text === "/start") {
-    return send(chatId, "📲 Отправьте контакт", {
+    return send(chatId, "📲 Отправьте ваш номер телефона, что бы мы смогли вас найти", {
       reply_markup: {
         keyboard: [
-          [{ text: "📞 Отправить контакт", request_contact: true }]
+          [{ text: "📞 Поделится моим номером телефона", request_contact: true }]
         ],
         resize_keyboard: true
       }
@@ -543,9 +543,11 @@ app.post("/webhook", async (req, res) => {
     const endRaw = subscriptionEndDate(merged);
     const until = new Date(endRaw).toLocaleDateString("ru-RU");
 
-    text += `📌 Название группы: ${groupTitle}\n`;
-    text += `   ${formatRemainingLessons(remaining)}\n`;
-    text += `   Действует до: ${until}\n\n`;
+    text += `📌 Абонемент\n`;
+    text += `Название группы где вы занимаетесь: ${groupTitle}\n`;
+    text += `${formatRemainingLessons(remaining)}\n`;
+    text += `Абонемент действует до: ${until}\n\n`;
+    text += `⏰ Если вам нужно напоминание об окончании Абонемента, выберите удобное время ниже что бы мы могли вам прислать уведомление\n`;
 
     const subId = s.id;
 
