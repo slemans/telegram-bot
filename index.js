@@ -1,12 +1,12 @@
 import "dotenv/config";
 import express from "express";
 import { createClient } from "@supabase/supabase-js";
-import * as cron from "node-cron";
 
 const SUPABASE_URL = process.env.SUPABASE_URL;
 const SUPABASE_KEY = process.env.SUPABASE_KEY;
 const BOT_TOKEN = process.env.BOT_TOKEN;
 const MOYK_API_KEY = process.env.MOYK_API_KEY;
+const JOB_SECRET = process.env.JOB_SECRET;
 
 if (!SUPABASE_URL || !SUPABASE_KEY || !BOT_TOKEN || !MOYK_API_KEY) {
   console.error(
@@ -16,6 +16,19 @@ if (!SUPABASE_URL || !SUPABASE_KEY || !BOT_TOKEN || !MOYK_API_KEY) {
 }
 
 const supabase = createClient(SUPABASE_URL, SUPABASE_KEY);
+let isNotificationsJobRunning = false;
+const sentNotificationKeys = new Set();
+
+function dbLogError(tag, err) {
+  if (!err) return;
+  console.error(
+    `[Supabase:${tag}]`,
+    err.code ?? "",
+    err.message ?? err,
+    err.details ?? "",
+    err.hint ?? ""
+  );
+}
 
 const app = express();
 app.use(express.json());
@@ -295,6 +308,13 @@ function daysUntilEndDateMinsk(endDateStr, now = new Date()) {
   return Math.round(
     (utcMidnightParts(end) - utcMidnightParts(todayStr)) / 86400000
   );
+}
+
+function isJobsRequestAuthorized(req) {
+  if (!JOB_SECRET) return false;
+  const bearer = req.headers.authorization?.replace(/^Bearer\s+/i, "").trim();
+  const byHeader = req.headers["x-job-secret"];
+  return bearer === JOB_SECRET || byHeader === JOB_SECRET;
 }
 
 function pickRemainingVisits(s) {
@@ -639,14 +659,37 @@ app.post("/webhook", async (req, res) => {
   }
 });
 
-// ================= CRON =================
-cron.schedule("* * * * *", async () => {
-  try {
-    const now = new Date();
-    const { hour, minute } = getMinskClock(now);
-    const today = todayDateMinsk(now);
+// ================= SCHEDULED JOB =================
+async function runNotificationsJob() {
+  if (isNotificationsJobRunning) {
+    return {
+      checked_active: 0,
+      expired_disabled: 0,
+      checked_candidates: 0,
+      sent: 0,
+      skipped_already_sent: 0,
+      skipped_outside_window: 0,
+      skipped_parallel_run: 1
+    };
+  }
+  isNotificationsJobRunning = true;
 
-    console.log("CRON Minsk:", hour, minute, "date", today);
+  const now = new Date();
+  const { hour, minute } = getMinskClock(now);
+  const today = todayDateMinsk(now);
+
+  const stats = {
+    checked_active: 0,
+    expired_disabled: 0,
+    checked_candidates: 0,
+    sent: 0,
+    skipped_already_sent: 0,
+    skipped_outside_window: 0,
+    skipped_parallel_run: 0
+  };
+
+  try {
+    console.log("JOB Minsk:", hour, minute, "date", today);
 
     // Авто-отключение завершённых абонементов выполняем каждую минуту:
     // это не зависит от времени напоминания.
@@ -658,6 +701,7 @@ cron.schedule("* * * * *", async () => {
     if (activeSelErr) {
       dbLogError("subscriptions select active for expire check", activeSelErr);
     } else if (activeSubs?.length) {
+      stats.checked_active = activeSubs.length;
       for (const s of activeSubs) {
         const diffDays = daysUntilEndDateMinsk(s.end_date, now);
         if (diffDays <= 0) {
@@ -666,13 +710,16 @@ cron.schedule("* * * * *", async () => {
             .update({ notify_enabled: false, active: false })
             .eq("external_id", s.external_id);
           dbLogError(`subscriptions expire ${s.external_id}`, expErr);
-          if (!expErr) console.log("ИСТЁК (авто off):", s.external_id);
+          if (!expErr) {
+            stats.expired_disabled += 1;
+            console.log("ИСТЁК (авто off):", s.external_id);
+          }
         }
       }
     }
 
-    // первые 15 минут часа по Минску (после рестарта не пропустить слот)
-    if (minute > 14) return;
+    // Первые 15 минут часа по Минску (если SaaS запускает чаще, не дублируем работу).
+    if (minute > 14) return stats;
 
     const { data: subs, error: selErr } = await supabase
       .from("subscriptions")
@@ -683,38 +730,48 @@ cron.schedule("* * * * *", async () => {
 
     if (selErr) {
       console.error("CRON select subscriptions:", selErr);
-      return;
+      return stats;
     }
 
     if (!subs || subs.length === 0) {
-      return;
+      return stats;
     }
 
-    console.log("CRON кандидатов:", subs.length, "notify_time=", hour);
+    stats.checked_candidates = subs.length;
+    console.log("JOB кандидатов:", subs.length, "notify_time=", hour);
 
     for (const s of subs) {
+      const dailyKey = `${today}:${String(s.external_id)}`;
+      if (sentNotificationKeys.has(dailyKey)) {
+        stats.skipped_already_sent += 1;
+        continue;
+      }
+
       const diffDays = daysUntilEndDateMinsk(s.end_date, now);
 
       if (diffDays <= 0) continue;
 
       if (diffDays < 1 || diffDays > 3) {
+        stats.skipped_outside_window += 1;
         console.log("SKIP (вне окна 1–3 дня):", s.external_id, diffDays);
         continue;
       }
 
       const { data: log, error: logErr } = await supabase
         .from("notifications_log")
-        .select("*")
+        .select("id")
         .eq("subscription_id", s.external_id)
         .eq("sent_date", today)
-        .maybeSingle();
+        .limit(1);
 
       if (logErr) {
         console.error("notifications_log select:", logErr);
         continue;
       }
 
-      if (log) {
+      if (Array.isArray(log) && log.length > 0) {
+        stats.skipped_already_sent += 1;
+        sentNotificationKeys.add(dailyKey);
         console.log("SKIP (уже отправляли):", s.external_id);
         continue;
       }
@@ -736,6 +793,8 @@ cron.schedule("* * * * *", async () => {
       });
 
       console.log("ОТПРАВЛЕНО:", s.external_id, "diffDays=", diffDays);
+      stats.sent += 1;
+      sentNotificationKeys.add(dailyKey);
 
       const { error: insErr } = await supabase
         .from("notifications_log")
@@ -750,7 +809,30 @@ cron.schedule("* * * * *", async () => {
       }
     }
   } catch (e) {
-    console.error("CRON ERROR:", e);
+    console.error("JOB ERROR:", e);
+    throw e;
+  } finally {
+    isNotificationsJobRunning = false;
+  }
+  return stats;
+}
+
+app.post("/jobs/check-notifications", async (req, res) => {
+  if (!JOB_SECRET) {
+    return res
+      .status(500)
+      .json({ ok: false, error: "JOB_SECRET is not configured" });
+  }
+
+  if (!isJobsRequestAuthorized(req)) {
+    return res.status(401).json({ ok: false, error: "Unauthorized" });
+  }
+
+  try {
+    const stats = await runNotificationsJob();
+    return res.status(200).json({ ok: true, ...stats });
+  } catch {
+    return res.status(500).json({ ok: false, error: "Job failed" });
   }
 });
 
