@@ -776,8 +776,23 @@ async function runNotificationsJob() {
         continue;
       }
 
+      const logPayload = {
+        subscription_id: s.external_id,
+        sent_date: today,
+        notify_time: hour
+      };
+      const { error: reserveErr } = await supabase
+        .from("notifications_log")
+        .insert(logPayload);
+      if (reserveErr) {
+        // Если не смогли зафиксировать отправку в БД, не отправляем сообщение:
+        // это безопаснее, чем спамить одинаковыми уведомлениями.
+        dbLogError(`notifications_log reserve ${s.external_id}`, reserveErr);
+        continue;
+      }
+      
       const title = s.name || "Абонемент";
-      const body = `⏰ Напоминание\n${title}\nДо окончания абонемента: ${pluralRuDays(diffDays)}`;
+      const body = `⏰ Напоминание об окончании абонемента\n${title}\nДо окончания абонемента: ${pluralRuDays(diffDays)}`;
 
       await send(s.chat_id, body, {
         reply_markup: {
@@ -795,18 +810,6 @@ async function runNotificationsJob() {
       console.log("ОТПРАВЛЕНО:", s.external_id, "diffDays=", diffDays);
       stats.sent += 1;
       sentNotificationKeys.add(dailyKey);
-
-      const { error: insErr } = await supabase
-        .from("notifications_log")
-        .upsert({
-          subscription_id: s.external_id,
-          sent_date: today,
-          notify_time: hour
-        }, { onConflict: "subscription_id,sent_date" });
-
-      if (insErr) {
-        console.error("notifications_log insert:", insErr, s.external_id);
-      }
     }
   } catch (e) {
     console.error("JOB ERROR:", e);
