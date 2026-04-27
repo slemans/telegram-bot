@@ -718,8 +718,9 @@ async function runNotificationsJob() {
       }
     }
 
-    // Первые 15 минут часа по Минску (если SaaS запускает чаще, не дублируем работу).
-    if (minute > 14) return stats;
+    // Отправляем только в точное начало часа, чтобы не было повторов
+    // при частом запуске scheduler (раз в минуту/несколько раз в минуту).
+    if (minute !== 0) return stats;
 
     const { data: subs, error: selErr } = await supabase
       .from("subscriptions")
@@ -737,10 +738,26 @@ async function runNotificationsJob() {
       return stats;
     }
 
-    stats.checked_candidates = subs.length;
-    console.log("JOB кандидатов:", subs.length, "notify_time=", hour);
-
+    // Дополнительная защита: если в таблице есть дубли строк по external_id,
+    // отправляем только одно уведомление на абонемент.
+    const uniqueByExternalId = new Map();
     for (const s of subs) {
+      const k = String(s.external_id);
+      if (!uniqueByExternalId.has(k)) uniqueByExternalId.set(k, s);
+    }
+    const uniqueSubs = [...uniqueByExternalId.values()];
+
+    stats.checked_candidates = uniqueSubs.length;
+    console.log(
+      "JOB кандидатов:",
+      uniqueSubs.length,
+      "(raw:",
+      subs.length,
+      ") notify_time=",
+      hour
+    );
+
+    for (const s of uniqueSubs) {
       const dailyKey = `${today}:${String(s.external_id)}`;
       if (sentNotificationKeys.has(dailyKey)) {
         stats.skipped_already_sent += 1;
