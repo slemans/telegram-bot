@@ -439,6 +439,116 @@ async function resolveSubscriptionForDisplay(token, s, nameCache) {
   };
 }
 
+const SUBSCRIPTIONS_MENU_TEXT = "🎫 Абонименты";
+
+function phoneRequestKeyboard() {
+  return {
+    keyboard: [
+      [{ text: SUBSCRIPTIONS_MENU_TEXT }],
+      [{ text: "📞 Поделится моим номером телефона", request_contact: true }]
+    ],
+    resize_keyboard: true
+  };
+}
+
+function isPhoneLikeText(value) {
+  if (typeof value !== "string") return false;
+  const digits = value.replace(/\D/g, "");
+  return digits.length >= 9 && digits.length <= 15;
+}
+
+async function sendSubscriptionsByPhone(chatId, phoneDigits) {
+  const phone = String(phoneDigits).replace(/\D/g, "");
+  const user = await findUser(phone);
+
+  if (!user) {
+    await send(chatId, "❌ Пользователь не найден");
+    return;
+  }
+
+  const { data: existingUser } = await supabase
+    .from("users")
+    .select("chat_id")
+    .eq("chat_id", chatId)
+    .maybeSingle();
+
+  if (!existingUser) {
+    const { error } = await supabase
+      .from("users")
+      .insert({
+        chat_id: chatId,
+        phone,
+        name: user.name
+      });
+    console.log("USER INSERT:", error);
+  } else {
+    const { error } = await supabase
+      .from("users")
+      .update({ phone, name: user.name })
+      .eq("chat_id", chatId);
+    console.log("USER UPDATE:", error);
+  }
+
+  const subs = await getSubs(user.id);
+  if (!subs.length) {
+    await send(chatId, "❌ Нет активных абонементов");
+    return;
+  }
+
+  const token = await getToken();
+  const nameCache = new Map();
+
+  let text = `✅ Клиент найден: ${user.name}\n\n🎫 Активные абонементы:\n\n`;
+  const buttons = [];
+
+  for (const s of subs) {
+    const { merged, remaining, groupTitle } = await resolveSubscriptionForDisplay(
+      token,
+      s,
+      nameCache
+    );
+
+    const endRaw = subscriptionEndDate(merged);
+    const until = new Date(endRaw).toLocaleDateString("ru-RU");
+
+    text += `📌 Абонемент\n`;
+    text += `Название группы где вы занимаетесь: ${groupTitle}\n`;
+    text += `${formatRemainingLessons(remaining)}\n`;
+    text += `Абонемент действует до: ${until}\n\n`;
+    text += `⏰ Если вам нужно напоминание об окончании Абонемента, выберите удобное время ниже что бы мы могли вам прислать уведомление\n`;
+
+    const subId = s.id;
+    buttons.push([
+      { text: "🕙 10:00", callback_data: `t_${subId}_10` },
+      { text: "🕑 14:00", callback_data: `t_${subId}_14` },
+      { text: "🌙 20:00", callback_data: `t_${subId}_20` },
+      { text: "🔕 Выкл", callback_data: `n_${subId}_off` }
+    ]);
+
+    const nameForDb = groupTitle !== "—" ? groupTitle : merged.name ?? null;
+    const { data, error } = await supabase
+      .from("subscriptions")
+      .upsert(
+        {
+          external_id: subId,
+          chat_id: chatId,
+          name: nameForDb,
+          end_date: endRaw,
+          remaining: remaining ?? pickRemainingVisits(merged),
+          active: true
+        },
+        { onConflict: "external_id" }
+      )
+      .select();
+
+    console.log("SUPABASE:", data, error);
+  }
+
+  await send(chatId, text, {
+    reply_markup: { inline_keyboard: buttons }
+  });
+}
+
 // ================= WEBHOOK (ВСЁ СЮДА) =================
 app.post("/webhook", async (req, res) => {
   res.sendStatus(200);
@@ -542,109 +652,46 @@ app.post("/webhook", async (req, res) => {
   if (msg.text === "/start") {
     return send(chatId, "📲 Отправьте ваш номер телефона, что бы мы смогли вас найти", {
       reply_markup: {
-        keyboard: [
-          [{ text: "📞 Поделится моим номером телефона", request_contact: true }]
-        ],
-        resize_keyboard: true
+        ...phoneRequestKeyboard()
       }
     });
   }
 
   // ================= CONTACT =================
-  if (!msg.contact) return;
-
-  const phone = msg.contact.phone_number.replace(/\D/g, "");
-
-  const user = await findUser(phone);
-
-  if (!user) {
-    return send(chatId, "❌ Пользователь не найден");
-  } else {
-    // ===== USERS SAVE =====
-    const { data: existingUser } = await supabase
+  if (msg.text === SUBSCRIPTIONS_MENU_TEXT) {
+    const { data: existingUser, error } = await supabase
       .from("users")
-      .select("*")
+      .select("phone")
       .eq("chat_id", chatId)
       .maybeSingle();
-    
-    if (!existingUser) {
-      const { error } = await supabase
-        .from("users")
-        .insert({
-          chat_id: chatId,
-          phone,
-          name: user.name
-        });
-    
-      console.log("USER INSERT:", error);
-    }
-  }
 
-  const subs = await getSubs(user.id);
+    dbLogError("users select by chat_id", error);
 
-  if (!subs.length) {
-    return send(chatId, "❌ Нет активных абонементов");
-  }
-
-  const token = await getToken();
-  const nameCache = new Map();
-
-  // ================= TEXT =================
-  let text = `✅ Клиент найден: ${user.name}\n\n🎫 Активные абонементы:\n\n`;
-
-  const buttons = [];
-
-  for (const s of subs) {
-    const { merged, remaining, groupTitle } = await resolveSubscriptionForDisplay(
-      token,
-      s,
-      nameCache
-    );
-
-    const endRaw = subscriptionEndDate(merged);
-    const until = new Date(endRaw).toLocaleDateString("ru-RU");
-
-    text += `📌 Абонемент\n`;
-    text += `Название группы где вы занимаетесь: ${groupTitle}\n`;
-    text += `${formatRemainingLessons(remaining)}\n`;
-    text += `Абонемент действует до: ${until}\n\n`;
-    text += `⏰ Если вам нужно напоминание об окончании Абонемента, выберите удобное время ниже что бы мы могли вам прислать уведомление\n`;
-
-    const subId = s.id;
-
-    buttons.push([
-      { text: "🕙 10:00", callback_data: `t_${subId}_10` },
-      { text: "🕑 14:00", callback_data: `t_${subId}_14` },
-      { text: "🌙 20:00", callback_data: `t_${subId}_20` },
-      { text: "🔕 Выкл", callback_data: `n_${subId}_off` }
-    ]);
-
-    const nameForDb =
-      groupTitle !== "—" ? groupTitle : merged.name ?? null;
-
-    const { data, error } = await supabase
-      .from("subscriptions")
-      .upsert(
-        {
-          external_id: subId,
-          chat_id: chatId,
-          name: nameForDb,
-          end_date: endRaw,
-          remaining: remaining ?? pickRemainingVisits(merged),
-          active: true
-        },
-        {
-          onConflict: "external_id"
+    if (!existingUser?.phone) {
+      await send(chatId, "📲 Сначала отправьте номер телефона, чтобы мы смогли найти ваши абонементы", {
+        reply_markup: {
+          ...phoneRequestKeyboard()
         }
-      )
-      .select();
+      });
+      return;
+    }
 
-    console.log("SUPABASE:", data, error);
+  await sendSubscriptionsByPhone(chatId, existingUser.phone);
+    return;
   }
 
-  await send(chatId, text, {
-    reply_markup: { inline_keyboard: buttons }
-  });
+  let phoneInput = null;
+  if (msg.contact?.phone_number) {
+    phoneInput = msg.contact.phone_number;
+  } else if (isPhoneLikeText(msg.text)) {
+    phoneInput = msg.text;
+  }
+
+  if (!phoneInput) {
+    return;
+  }
+
+  await sendSubscriptionsByPhone(chatId, phoneInput);
   } catch (err) {
     console.error("WEBHOOK ERROR:", err);
     const chatIdTry =
@@ -763,7 +810,6 @@ async function runNotificationsJob() {
         stats.skipped_already_sent += 1;
         continue;
       }
-
       const diffDays = daysUntilEndDateMinsk(s.end_date, now);
 
       if (diffDays <= 0) continue;
