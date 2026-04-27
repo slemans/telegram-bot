@@ -517,28 +517,45 @@ async function sendSubscriptionsByPhone(chatId, phoneDigits) {
     text += `Абонемент действует до: ${until}\n\n`;
     text += `⏰ Если вам нужно напоминание об окончании Абонемента, выберите удобное время ниже что бы мы могли вам прислать уведомление\n`;
 
-    const subId = s.id;
+    const subIdStr = String(s.id);
     buttons.push([
-      { text: "🕙 10:00", callback_data: `t_${subId}_10` },
-      { text: "🕑 14:00", callback_data: `t_${subId}_14` },
-      { text: "🌙 20:00", callback_data: `t_${subId}_20` },
-      { text: "🔕 Выкл", callback_data: `n_${subId}_off` }
+      { text: "🕙 10:00", callback_data: `t_${subIdStr}_10` },
+      { text: "🕑 14:00", callback_data: `t_${subIdStr}_14` },
+      { text: "🌙 20:00", callback_data: `t_${subIdStr}_20` },
+      { text: "🔕 Выкл", callback_data: `n_${subIdStr}_off` }
     ]);
 
     const nameForDb = groupTitle !== "—" ? groupTitle : merged.name ?? null;
+    const { data: prevRows, error: prevSelErr } = await supabase
+      .from("subscriptions")
+      .select("notify_enabled, notify_time")
+      .eq("external_id", subIdStr)
+      .limit(1);
+    if (prevSelErr) {
+      console.error("SUBSCRIPTIONS PRE-UPSERT SELECT:", prevSelErr);
+    }
+    const prev = Array.isArray(prevRows) ? prevRows[0] : null;
+
+    const upsertRow = {
+      external_id: subIdStr,
+      chat_id: chatId,
+      name: nameForDb,
+      end_date: endRaw,
+      remaining: remaining ?? pickRemainingVisits(merged),
+      active: true
+    };
+    if (prev) {
+      if (prev.notify_enabled != null) {
+        upsertRow.notify_enabled = prev.notify_enabled;
+      }
+      if (prev.notify_time != null && prev.notify_time !== "") {
+        upsertRow.notify_time = prev.notify_time;
+      }
+    }
+
     const { data, error } = await supabase
       .from("subscriptions")
-      .upsert(
-        {
-          external_id: subId,
-          chat_id: chatId,
-          name: nameForDb,
-          end_date: endRaw,
-          remaining: remaining ?? pickRemainingVisits(merged),
-          active: true
-        },
-        { onConflict: "external_id" }
-      )
+      .upsert(upsertRow, { onConflict: "external_id" })
       .select();
 
     console.log("SUPABASE:", data, error);
@@ -563,7 +580,7 @@ app.post("/webhook", async (req, res) => {
 
     const cancelMatch = data.match(/^n_(.+)_off$/);
     if (cancelMatch) {
-      const subId = cancelMatch[1];
+      const subId = String(cancelMatch[1]);
       const { error } = await supabase
         .from("subscriptions")
         .update({ notify_enabled: false })
@@ -580,7 +597,7 @@ app.post("/webhook", async (req, res) => {
 
     const parts = data.split("_");
     if (parts[0] === "t" && parts.length >= 3) {
-      const subId = parts[1];
+      const subId = String(parts[1]);
       const selectedTime = parseInt(parts[2], 10);
 
       if (Number.isNaN(selectedTime)) {
@@ -608,17 +625,31 @@ app.post("/webhook", async (req, res) => {
         return;
       }
 
-      const { error } = await supabase
+      const { data: updatedRows, error } = await supabase
         .from("subscriptions")
         .update({
           notify_enabled: true,
           notify_time: selectedTime
         })
-        .eq("external_id", String(subId));
+        .eq("external_id", subId)
+        .select("external_id");
 
       if (error) {
         console.error("CALLBACK UPDATE:", error);
         await answerCallbackQuery(q, "Не удалось сохранить время");
+        return;
+      }
+
+      if (!updatedRows?.length) {
+        console.error("CALLBACK UPDATE: 0 rows", subId);
+        await answerCallbackQuery(
+          q,
+          "Запись не найдена — откройте «Абонименты» ещё раз и выберите время"
+        );
+        await send(
+          q.message.chat.id,
+          "⚠️ Не удалось сохранить время напоминания: в базе нет строки абонемента. Нажмите «🎫 Абонименты» (или отправьте телефон), затем снова выберите время."
+        );
         return;
       }
 
