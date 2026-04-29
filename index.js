@@ -875,13 +875,40 @@ async function runNotificationsJob() {
         sent_date: today,
         notify_time: hour
       };
-      const { error: reserveErr } = await supabase
+      const { data: reserveRow, error: reserveErr } = await supabase
         .from("notifications_log")
-        .insert(logPayload);
+        .insert(logPayload)
+        .select("id")
+        .maybeSingle();
       if (reserveErr) {
         // Если не смогли зафиксировать отправку в БД, не отправляем сообщение:
         // это безопаснее, чем спамить одинаковыми уведомлениями.
         dbLogError(`notifications_log reserve ${s.external_id}`, reserveErr);
+        continue;
+      }
+
+      // Защита от гонок: отправляет только тот запуск, который "застолбил"
+      // самую первую запись за день по этому абонементу.
+      const { data: firstLogRow, error: firstLogErr } = await supabase
+        .from("notifications_log")
+        .select("id")
+        .eq("subscription_id", s.external_id)
+        .eq("sent_date", today)
+        .order("id", { ascending: true })
+        .limit(1)
+        .maybeSingle();
+
+      if (firstLogErr) {
+        dbLogError(`notifications_log first-row ${s.external_id}`, firstLogErr);
+        continue;
+      }
+
+      const reservedId = reserveRow?.id;
+      const firstId = firstLogRow?.id;
+      if (reservedId == null || firstId == null || reservedId !== firstId) {
+        stats.skipped_already_sent += 1;
+        sentNotificationKeys.add(dailyKey);
+        console.log("SKIP (гонка/дубль):", s.external_id, "reserveId=", reservedId, "firstId=", firstId);
         continue;
       }
       
