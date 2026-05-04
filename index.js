@@ -30,6 +30,11 @@ function dbLogError(tag, err) {
   );
 }
 
+/** PostgreSQL: unique_violation — дубль ключа (ожидаемо при гонке джобов). */
+function isUniqueViolation(err) {
+  return err && String(err.code) === "23505";
+}
+
 const app = express();
 app.use(express.json());
 
@@ -836,7 +841,8 @@ async function runNotificationsJob() {
     );
 
     for (const s of uniqueSubs) {
-      const dailyKey = `${today}:${String(s.external_id)}`;
+      const extId = String(s.external_id);
+      const dailyKey = `${today}:${extId}`;
       if (sentNotificationKeys.has(dailyKey)) {
         stats.skipped_already_sent += 1;
         continue;
@@ -847,14 +853,14 @@ async function runNotificationsJob() {
 
       if (diffDays < 1 || diffDays > 3) {
         stats.skipped_outside_window += 1;
-        console.log("SKIP (вне окна 1–3 дня):", s.external_id, diffDays);
+        console.log("SKIP (вне окна 1–3 дня):", extId, diffDays);
         continue;
       }
 
       const { data: log, error: logErr } = await supabase
         .from("notifications_log")
         .select("id")
-        .eq("subscription_id", s.external_id)
+        .eq("subscription_id", extId)
         .eq("sent_date", today)
         .limit(1);
 
@@ -866,12 +872,12 @@ async function runNotificationsJob() {
       if (Array.isArray(log) && log.length > 0) {
         stats.skipped_already_sent += 1;
         sentNotificationKeys.add(dailyKey);
-        console.log("SKIP (уже отправляли):", s.external_id);
+        console.log("SKIP (уже отправляли):", extId);
         continue;
       }
 
       const logPayload = {
-        subscription_id: s.external_id,
+        subscription_id: extId,
         sent_date: today,
         notify_time: hour
       };
@@ -881,37 +887,20 @@ async function runNotificationsJob() {
         .select("id")
         .maybeSingle();
       if (reserveErr) {
-        // Если не смогли зафиксировать отправку в БД, не отправляем сообщение:
-        // это безопаснее, чем спамить одинаковыми уведомлениями.
-        dbLogError(`notifications_log reserve ${s.external_id}`, reserveErr);
+        if (isUniqueViolation(reserveErr)) {
+          stats.skipped_already_sent += 1;
+          sentNotificationKeys.add(dailyKey);
+          console.log("SKIP (уникальный индекс / гонка):", extId);
+          continue;
+        }
+        dbLogError(`notifications_log reserve ${extId}`, reserveErr);
         continue;
       }
 
-      // Защита от гонок: отправляет только тот запуск, который "застолбил"
-      // самую первую запись за день по этому абонементу.
-      const { data: firstLogRow, error: firstLogErr } = await supabase
-        .from("notifications_log")
-        .select("id")
-        .eq("subscription_id", s.external_id)
-        .eq("sent_date", today)
-        .order("id", { ascending: true })
-        .limit(1)
-        .maybeSingle();
-
-      if (firstLogErr) {
-        dbLogError(`notifications_log first-row ${s.external_id}`, firstLogErr);
+      if (reserveRow?.id == null) {
+        dbLogError(`notifications_log reserve no id ${extId}`, new Error("insert returned no id"));
         continue;
       }
-
-      const reservedId = reserveRow?.id;
-      const firstId = firstLogRow?.id;
-      if (reservedId == null || firstId == null || reservedId !== firstId) {
-        stats.skipped_already_sent += 1;
-        sentNotificationKeys.add(dailyKey);
-        console.log("SKIP (гонка/дубль):", s.external_id, "reserveId=", reservedId, "firstId=", firstId);
-        continue;
-      }
-      
       const title = s.name || "Абонемент";
       const body = `⏰ Напоминание об окончании абонемента\n${title}\nДо окончания абонемента: ${pluralRuDays(diffDays)}`;
 
@@ -921,14 +910,14 @@ async function runNotificationsJob() {
             [
               {
                 text: "🔕 Отключить напоминания",
-                callback_data: `n_${s.external_id}_off`
+                callback_data: `n_${extId}_off`
               }
             ]
           ]
         }
       });
 
-      console.log("ОТПРАВЛЕНО:", s.external_id, "diffDays=", diffDays);
+      console.log("ОТПРАВЛЕНО:", extId, "diffDays=", diffDays);
       stats.sent += 1;
       sentNotificationKeys.add(dailyKey);
     }
