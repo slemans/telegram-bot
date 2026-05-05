@@ -830,23 +830,11 @@ async function runNotificationsJob() {
     }
     const uniqueSubs = [...uniqueByExternalId.values()];
 
-    stats.checked_candidates = uniqueSubs.length;
-    console.log(
-      "JOB кандидатов:",
-      uniqueSubs.length,
-      "(raw:",
-      subs.length,
-      ") notify_time=",
-      hour
-    );
+    const byChat = new Map();
 
     for (const s of uniqueSubs) {
       const extId = String(s.external_id);
       const dailyKey = `${today}:${extId}`;
-      if (sentNotificationKeys.has(dailyKey)) {
-        stats.skipped_already_sent += 1;
-        continue;
-      }
       const diffDays = daysUntilEndDateMinsk(s.end_date, now);
 
       if (diffDays <= 0) continue;
@@ -857,27 +845,56 @@ async function runNotificationsJob() {
         continue;
       }
 
+      const chKey = String(s.chat_id);
+      if (!byChat.has(chKey)) byChat.set(chKey, []);
+      byChat.get(chKey).push({ s, extId, diffDays });
+    }
+
+    let subsInWindow = 0;
+    for (const arr of byChat.values()) subsInWindow += arr.length;
+    stats.checked_candidates = subsInWindow;
+    console.log(
+      "JOB: чатов в окне",
+      byChat.size,
+      "абонементов:",
+      subsInWindow,
+      "(строк в выборке:",
+      subs.length,
+      ") notify_time=",
+      hour
+    );
+
+      for (const [chKey, items] of byChat) {
+      const chatId = items[0].s.chat_id;
+      const dailyKey = `${today}:chat:${chKey}`;
+      if (sentNotificationKeys.has(dailyKey)) {
+        stats.skipped_already_sent += 1;
+        continue;
+      }
+
       const { data: log, error: logErr } = await supabase
         .from("notifications_log")
         .select("id")
-        .eq("subscription_id", extId)
+        .eq("chat_id", chatId)
         .eq("sent_date", today)
         .limit(1);
 
       if (logErr) {
-        console.error("notifications_log select:", logErr);
+        console.error("notifications_log select by chat:", logErr);
         continue;
       }
 
       if (Array.isArray(log) && log.length > 0) {
         stats.skipped_already_sent += 1;
         sentNotificationKeys.add(dailyKey);
-        console.log("SKIP (уже отправляли):", extId);
+        console.log("SKIP (уже отправляли чату):", chKey);
         continue;
       }
 
+      const primaryExtId = items[0].extId;
       const logPayload = {
-        subscription_id: extId,
+        chat_id: chatId,
+        subscription_id: primaryExtId,
         sent_date: today,
         notify_time: hour
       };
@@ -890,34 +907,48 @@ async function runNotificationsJob() {
         if (isUniqueViolation(reserveErr)) {
           stats.skipped_already_sent += 1;
           sentNotificationKeys.add(dailyKey);
-          console.log("SKIP (уникальный индекс / гонка):", extId);
+          console.log("SKIP (уникальный индекс / гонка по чату):", chKey);
           continue;
         }
-        dbLogError(`notifications_log reserve ${extId}`, reserveErr);
+        dbLogError(`notifications_log reserve chat ${chKey}`, reserveErr);
         continue;
       }
 
       if (reserveRow?.id == null) {
-        dbLogError(`notifications_log reserve no id ${extId}`, new Error("insert returned no id"));
+        dbLogError(
+          `notifications_log reserve no id chat ${chKey}`,
+          new Error("insert returned no id")
+        );
         continue;
       }
-      const title = s.name || "Абонемент";
-      const body = `⏰ Напоминание об окончании абонемента\n${title}\nДо окончания абонемента: ${pluralRuDays(diffDays)}`;
-
-      await send(s.chat_id, body, {
+        
+      let body = "⏰ Напоминание\n";
+      if (items.length === 1) {
+        const { s, diffDays } = items[0];
+        const title = s.name || "Абонемент";
+        body += `${title}\nДо окончания абонемента: ${pluralRuDays(diffDays)}`;
+      } else {
+        for (const { s, diffDays } of items) {
+          const title = s.name || "Абонемент";
+          body += `• ${title} — ${pluralRuDays(diffDays)}\n`;
+        }
+        body = body.replace(/\n+$/, "");
+      }
+        
+      await send(chatId, body, {
         reply_markup: {
           inline_keyboard: [
             [
               {
                 text: "🔕 Отключить напоминания",
-                callback_data: `n_${extId}_off`
+                callback_data: `n_${primaryExtId}_off`
               }
             ]
           ]
         }
       });
 
-      console.log("ОТПРАВЛЕНО:", extId, "diffDays=", diffDays);
+      console.log("ОТПРАВЛЕНО чату:", chKey, "абонементов в сообщении:", items.length);
       stats.sent += 1;
       sentNotificationKeys.add(dailyKey);
     }
