@@ -531,6 +531,7 @@ async function sendSubscriptionsByPhone(chatId, phoneDigits) {
     ]);
 
     const nameForDb = groupTitle !== "—" ? groupTitle : merged.name ?? null;
+
     const { data: prevRows, error: prevSelErr } = await supabase
       .from("subscriptions")
       .select("notify_enabled, notify_time")
@@ -693,14 +694,12 @@ app.post("/webhook", async (req, res) => {
     });
   }
 
-  // ================= CONTACT =================
   if (msg.text === SUBSCRIPTIONS_MENU_TEXT) {
     const { data: existingUser, error } = await supabase
       .from("users")
       .select("phone")
       .eq("chat_id", chatId)
       .maybeSingle();
-
     dbLogError("users select by chat_id", error);
 
     if (!existingUser?.phone) {
@@ -712,7 +711,7 @@ app.post("/webhook", async (req, res) => {
       return;
     }
 
-  await sendSubscriptionsByPhone(chatId, existingUser.phone);
+    await sendSubscriptionsByPhone(chatId, existingUser.phone);
     return;
   }
 
@@ -830,11 +829,11 @@ async function runNotificationsJob() {
     }
     const uniqueSubs = [...uniqueByExternalId.values()];
 
+    /** По chat_id: в МойКласс у одного клиента может быть несколько активных абонементов —
+     * все с одним notify_time дали бы N отдельных сообщений. Шлём одно сообщение на чат в день. */
     const byChat = new Map();
-
     for (const s of uniqueSubs) {
       const extId = String(s.external_id);
-      const dailyKey = `${today}:${extId}`;
       const diffDays = daysUntilEndDateMinsk(s.end_date, now);
 
       if (diffDays <= 0) continue;
@@ -864,7 +863,7 @@ async function runNotificationsJob() {
       hour
     );
 
-      for (const [chKey, items] of byChat) {
+    for (const [chKey, items] of byChat) {
       const chatId = items[0].s.chat_id;
       const dailyKey = `${today}:chat:${chKey}`;
       if (sentNotificationKeys.has(dailyKey)) {
@@ -903,6 +902,7 @@ async function runNotificationsJob() {
         .insert(logPayload)
         .select("id")
         .maybeSingle();
+
       if (reserveErr) {
         if (isUniqueViolation(reserveErr)) {
           stats.skipped_already_sent += 1;
@@ -921,7 +921,7 @@ async function runNotificationsJob() {
         );
         continue;
       }
-        
+
       let body = "⏰ Напоминание\n";
       if (items.length === 1) {
         const { s, diffDays } = items[0];
@@ -934,7 +934,7 @@ async function runNotificationsJob() {
         }
         body = body.replace(/\n+$/, "");
       }
-        
+
       await send(chatId, body, {
         reply_markup: {
           inline_keyboard: [
@@ -948,7 +948,12 @@ async function runNotificationsJob() {
         }
       });
 
-      console.log("ОТПРАВЛЕНО чату:", chKey, "абонементов в сообщении:", items.length);
+      console.log(
+        "ОТПРАВЛЕНО чату:",
+        chKey,
+        "абонементов в сообщении:",
+        items.length
+      );
       stats.sent += 1;
       sentNotificationKeys.add(dailyKey);
     }
