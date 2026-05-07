@@ -11,6 +11,7 @@ module.exports = {
       instances: 1,
       autorestart: true,
       max_memory_restart: "200M",
+      JOB_SECRET: "375295870644",
     },
   ],
 };
