@@ -465,16 +465,37 @@ async function resolveSubscriptionForDisplay(token, s, nameCache) {
 const SUBSCRIPTIONS_MENU_TEXT = "🎫 Абонименты";
 const HELP_MENU_TEXT = "🆘 Помощь";
 const LEGACY_HELP_MENU_TEXT = "/help помощь";
+const CONTACT_SHARE_LABEL = "📞 Поделится моим номером телефона";
 
-function phoneRequestKeyboard() {
+function mainMenuKeyboard() {
   return {
     keyboard: [
       [{ text: SUBSCRIPTIONS_MENU_TEXT }],
-      [{ text: HELP_MENU_TEXT }],
-      [{ text: "📞 Поделится моим номером телефона", request_contact: true }]
+      [{ text: HELP_MENU_TEXT }]
     ],
     resize_keyboard: true
   };
+}
+
+function sharePhoneInlineReplyMarkup() {
+  return {
+    inline_keyboard: [
+      [{ text: CONTACT_SHARE_LABEL, callback_data: "req_phone" }]
+    ]
+  };
+}
+
+/** Нижнее меню + inline-кнопка контакта (как у напоминаний). */
+async function promptPhoneCollection(chatId, bodyText) {
+  await send(chatId, bodyText, { reply_markup: mainMenuKeyboard() });
+  await send(chatId, "📞 Нажмите кнопку ниже:", {
+    reply_markup: sharePhoneInlineReplyMarkup()
+  });
+}
+
+/** Восстановить нижнее меню после одноразовой клавиатуры контакта или inline-only. */
+async function ensureMainMenu(chatId) {
+  await send(chatId, "\u2060", { reply_markup: mainMenuKeyboard() });
 }
 
 function isPhoneLikeText(value) {
@@ -490,12 +511,14 @@ function isTelegramCommand(text, cmd) {
   return re.test(text.trim());
 }
 
-async function sendSubscriptionsByPhone(chatId, phoneDigits) {
+async function sendSubscriptionsByPhone(chatId, phoneDigits, opts = {}) {
   const phone = String(phoneDigits).replace(/\D/g, "");
   const user = await findUser(phone);
 
   if (!user) {
-    await send(chatId, "❌ Пользователь не найден");
+    await send(chatId, "❌ Пользователь не найден", {
+      reply_markup: mainMenuKeyboard()
+    });
     return;
   }
 
@@ -524,7 +547,9 @@ async function sendSubscriptionsByPhone(chatId, phoneDigits) {
 
   const subs = await getSubs(user.id);
   if (!subs.length) {
-    await send(chatId, "❌ Нет активных абонементов");
+    await send(chatId, "❌ Нет активных абонементов", {
+      reply_markup: mainMenuKeyboard()
+    });
     return;
   }
 
@@ -598,6 +623,9 @@ async function sendSubscriptionsByPhone(chatId, phoneDigits) {
   await send(chatId, text, {
     reply_markup: { inline_keyboard: buttons }
   });
+  if (opts.restoreMainMenu) {
+    await ensureMainMenu(chatId);
+  }
 }
 
 // ================= HELP (SUPABASE) =================
@@ -657,6 +685,23 @@ app.post("/webhook", async (req, res) => {
     // если сначала ходить в Supabase (особенно после простоя), пользователь видит
     // минуту «зависания», хотя webhook уже ответил 200.
     await answerCallbackQuery(q);
+
+    if (data === "req_phone") {
+      if (callbackChatId != null) {
+        await send(
+          callbackChatId,
+          "Нажмите кнопку внизу экрана, чтобы отправить контакт:",
+          {
+            reply_markup: {
+              keyboard: [[{ text: CONTACT_SHARE_LABEL, request_contact: true }]],
+              resize_keyboard: true,
+              one_time_keyboard: true
+            }
+          }
+        );
+      }
+      return;
+    }
 
     const cancelMatch = data.match(/^n_(.+)_off$/);
     if (cancelMatch) {
@@ -769,11 +814,11 @@ app.post("/webhook", async (req, res) => {
 
   // ================= START =================
   if (isTelegramCommand(msg.text, "start")) {
-    return send(chatId, "📲 Отправьте ваш номер телефона, что бы мы смогли вас найти", {
-      reply_markup: {
-        ...phoneRequestKeyboard()
-      }
-    });
+    await promptPhoneCollection(
+      chatId,
+      "📲 Отправьте ваш номер телефона, что бы мы смогли вас найти"
+    );
+    return;
   }
 
   // ================= HELP =================
@@ -787,7 +832,7 @@ app.post("/webhook", async (req, res) => {
       await send(
         chatId,
         "⚠️ Не удалось создать обращение в базе (проверьте таблицу help_requests и политики RLS в Supabase). Напишите администратору или попробуйте позже.",
-        { reply_markup: { ...phoneRequestKeyboard() } }
+        { reply_markup: mainMenuKeyboard() }
       );
       return;
     }
@@ -795,9 +840,7 @@ app.post("/webhook", async (req, res) => {
       chatId,
       "Если у вас возникли проблемы — напишите, что случилось, и мы вам поможем.",
       {
-        reply_markup: {
-          ...phoneRequestKeyboard()
-        }
+        reply_markup: mainMenuKeyboard()
       }
     );
     return;
@@ -812,11 +855,10 @@ app.post("/webhook", async (req, res) => {
     dbLogError("users select by chat_id", error);
 
     if (!existingUser?.phone) {
-      await send(chatId, "📲 Сначала отправьте номер телефона, чтобы мы смогли найти ваши абонементы", {
-        reply_markup: {
-          ...phoneRequestKeyboard()
-        }
-      });
+      await promptPhoneCollection(
+        chatId,
+        "📲 Сначала отправьте номер телефона, чтобы мы смогли найти ваши абонементы"
+      );
       return;
     }
 
@@ -834,9 +876,7 @@ app.post("/webhook", async (req, res) => {
           chatId,
           "✅ Спасибо! Сообщение принято. Мы свяжемся с вами в ближайшее время.",
           {
-            reply_markup: {
-              ...phoneRequestKeyboard()
-            }
+            reply_markup: mainMenuKeyboard()
           }
         );
       } else {
@@ -844,9 +884,7 @@ app.post("/webhook", async (req, res) => {
           chatId,
           "⚠️ Не удалось сохранить обращение. Попробуйте ещё раз или напишите администратору.",
           {
-            reply_markup: {
-              ...phoneRequestKeyboard()
-            }
+            reply_markup: mainMenuKeyboard()
           }
         );
       }
@@ -865,7 +903,9 @@ app.post("/webhook", async (req, res) => {
     return;
   }
 
-  await sendSubscriptionsByPhone(chatId, phoneInput);
+  await sendSubscriptionsByPhone(chatId, phoneInput, {
+    restoreMainMenu: Boolean(msg.contact?.phone_number)
+  });
   } catch (err) {
     console.error("WEBHOOK ERROR:", err);
     const chatIdTry =
