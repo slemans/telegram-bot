@@ -782,7 +782,15 @@ app.post("/webhook", async (req, res) => {
     msg.text === LEGACY_HELP_MENU_TEXT ||
     isTelegramCommand(msg.text, "help")
   ) {
-    await createHelpRequest(chatId);
+    const helpRowId = await createHelpRequest(chatId);
+    if (helpRowId == null) {
+      await send(
+        chatId,
+        "⚠️ Не удалось создать обращение в базе (проверьте таблицу help_requests и политики RLS в Supabase). Напишите администратору или попробуйте позже.",
+        { reply_markup: { ...phoneRequestKeyboard() } }
+      );
+      return;
+    }
     await send(
       chatId,
       "Если у вас возникли проблемы — напишите, что случилось, и мы вам поможем.",
