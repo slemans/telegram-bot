@@ -463,7 +463,8 @@ async function resolveSubscriptionForDisplay(token, s, nameCache) {
 }
 
 const SUBSCRIPTIONS_MENU_TEXT = "🎫 Абонименты";
-const HELP_MENU_TEXT = "Техподдежка";
+const HELP_MENU_TEXT = "🆘 Помощь";
+const LEGACY_HELP_MENU_TEXT = "/help помощь";
 
 function phoneRequestKeyboard() {
   return {
@@ -773,7 +774,7 @@ app.post("/webhook", async (req, res) => {
   }
 
   // ================= HELP =================
-   if (msg.text === HELP_MENU_TEXT || isTelegramCommand(msg.text, "help")) {
+    if (msg.text === HELP_MENU_TEXT || msg.text === LEGACY_HELP_MENU_TEXT || isTelegramCommand(msg.text, "help")) {
     await createHelpRequest(chatId);
     await send(
       chatId,
