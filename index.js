@@ -70,6 +70,23 @@ async function answerCallbackQuery(q, text) {
     })
   });
 }
+async function setBotCommands() {
+  const commands = [
+    { command: "start", description: "Начать работу" },
+    { command: "help", description: "Помощь и сообщение о проблеме" }
+  ];
+  const r = await fetch(`https://api.telegram.org/bot${BOT_TOKEN}/setMyCommands`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ commands })
+  });
+  const d = await r.json().catch(() => ({}));
+  if (!r.ok) {
+    console.error("Telegram setMyCommands:", r.status, d);
+  } else {
+    console.log("Telegram commands updated");
+  }
+}
 
 // ================= MOYK =================
 async function getToken() {
@@ -1092,3 +1109,7 @@ const PORT = Number(process.env.PORT) || 3000;
 app.listen(PORT, "0.0.0.0", () =>
   console.log(`🚀 Bot started on http://0.0.0.0:${PORT}`)
 );
+
+setBotCommands().catch((err) => {
+  console.error("setBotCommands ERROR:", err);
+});
