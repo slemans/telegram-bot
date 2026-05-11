@@ -42,7 +42,6 @@ app.get("/health", (_req, res) => {
   res.sendStatus(200);
 });
 
-
 // ================= TELEGRAM =================
 async function send(chatId, text, extra = {}) {
   const r = await fetch(`https://api.telegram.org/bot${BOT_TOKEN}/sendMessage`, {
@@ -70,9 +69,10 @@ async function answerCallbackQuery(q, text) {
     })
   });
 }
+
 async function setBotCommands() {
   const commands = [
-    { command: "start", description: "Начать работу" },
+    { command: "start", description: "Запустить бота" },
     { command: "help", description: "Помощь и сообщение о проблеме" }
   ];
   const r = await fetch(`https://api.telegram.org/bot${BOT_TOKEN}/setMyCommands`, {
@@ -600,7 +600,6 @@ async function sendSubscriptionsByPhone(chatId, phoneDigits) {
   });
 }
 
-
 // ================= HELP (SUPABASE) =================
 async function createHelpRequest(chatId) {
   const { data, error } = await supabase
@@ -608,12 +607,14 @@ async function createHelpRequest(chatId) {
     .insert({ chat_id: chatId })
     .select("id")
     .maybeSingle();
+
   if (error) {
     dbLogError("help_requests insert", error);
     return null;
   }
   return data?.id ?? null;
 }
+
 async function findOpenHelpRequest(chatId) {
   const { data, error } = await supabase
     .from("help_requests")
@@ -622,12 +623,14 @@ async function findOpenHelpRequest(chatId) {
     .is("problem_text", null)
     .order("created_at", { ascending: false })
     .limit(1);
+
   if (error) {
     dbLogError("help_requests select open", error);
     return null;
   }
   return Array.isArray(data) ? data[0] ?? null : null;
 }
+
 async function closeHelpRequest(id, problemText) {
   const { error } = await supabase
     .from("help_requests")
@@ -742,7 +745,7 @@ app.post("/webhook", async (req, res) => {
 
       if (current?.notify_enabled && Number.isFinite(Number(current.notify_time))) {
         const prevTime = Number(current.notify_time);
-         if (callbackChatId != null) {
+        if (callbackChatId != null) {
           await send(
             callbackChatId,
             `🔁 Время уведомления изменено: ${prevTime}:00 → ${selectedTime}:00`
@@ -763,7 +766,7 @@ app.post("/webhook", async (req, res) => {
   if (!msg) return;
 
   const chatId = msg.chat.id;
-    
+
   // ================= START =================
   if (isTelegramCommand(msg.text, "start")) {
     return send(chatId, "📲 Отправьте ваш номер телефона, что бы мы смогли вас найти", {
@@ -774,7 +777,11 @@ app.post("/webhook", async (req, res) => {
   }
 
   // ================= HELP =================
-    if (msg.text === HELP_MENU_TEXT || msg.text === LEGACY_HELP_MENU_TEXT || isTelegramCommand(msg.text, "help")) {
+  if (
+    msg.text === HELP_MENU_TEXT ||
+    msg.text === LEGACY_HELP_MENU_TEXT ||
+    isTelegramCommand(msg.text, "help")
+  ) {
     await createHelpRequest(chatId);
     await send(
       chatId,
@@ -809,7 +816,7 @@ app.post("/webhook", async (req, res) => {
     return;
   }
 
-    // Если пользователь открыл /help — следующее текстовое сообщение считаем описанием проблемы
+  // Если пользователь открыл /help — следующее текстовое сообщение считаем описанием проблемы
   if (typeof msg.text === "string" && msg.text.trim()) {
     const openReq = await findOpenHelpRequest(chatId);
     if (openReq?.id) {
