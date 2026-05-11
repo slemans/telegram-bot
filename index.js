@@ -700,6 +700,10 @@ app.post("/webhook", async (req, res) => {
 
   const chatId = msg.chat.id;
 
+if (msg.text === "/rule") {
+
+}
+    
   // ================= START =================
   if (msg.text === "/start") {
     return send(chatId, "📲 Отправьте ваш номер телефона, что бы мы смогли вас найти", {
