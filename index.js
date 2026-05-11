@@ -482,6 +482,13 @@ function isPhoneLikeText(value) {
   return digits.length >= 9 && digits.length <= 15;
 }
 
+function isTelegramCommand(text, cmd) {
+  if (typeof text !== "string") return false;
+  const escaped = cmd.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  const re = new RegExp(`^/${escaped}(?:@\\w+)?(?:\\s|$)`, "i");
+  return re.test(text.trim());
+}
+
 async function sendSubscriptionsByPhone(chatId, phoneDigits) {
   const phone = String(phoneDigits).replace(/\D/g, "");
   const user = await findUser(phone);
@@ -757,7 +764,7 @@ app.post("/webhook", async (req, res) => {
   const chatId = msg.chat.id;
     
   // ================= START =================
-  if (msg.text === "/start") {
+  if (isTelegramCommand(msg.text, "start")) {
     return send(chatId, "📲 Отправьте ваш номер телефона, что бы мы смогли вас найти", {
       reply_markup: {
         ...phoneRequestKeyboard()
@@ -766,11 +773,7 @@ app.post("/webhook", async (req, res) => {
   }
 
   // ================= HELP =================
-  if (
-    msg.text === HELP_MENU_TEXT ||
-    msg.text === "/help" ||
-    (typeof msg.text === "string" && msg.text.trim().startsWith("/help "))
-  ) {
+   if (msg.text === HELP_MENU_TEXT || isTelegramCommand(msg.text, "help")) {
     await createHelpRequest(chatId);
     await send(
       chatId,
