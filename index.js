@@ -446,11 +446,13 @@ async function resolveSubscriptionForDisplay(token, s, nameCache) {
 }
 
 const SUBSCRIPTIONS_MENU_TEXT = "🎫 Абонименты";
+const HELP_MENU_TEXT = "Техподдежка";
 
 function phoneRequestKeyboard() {
   return {
     keyboard: [
       [{ text: SUBSCRIPTIONS_MENU_TEXT }],
+      [{ text: HELP_MENU_TEXT }],
       [{ text: "📞 Поделится моим номером телефона", request_contact: true }]
     ],
     resize_keyboard: true
@@ -571,6 +573,43 @@ async function sendSubscriptionsByPhone(chatId, phoneDigits) {
   await send(chatId, text, {
     reply_markup: { inline_keyboard: buttons }
   });
+}
+
+
+// ================= HELP (SUPABASE) =================
+async function createHelpRequest(chatId) {
+  const { data, error } = await supabase
+    .from("help_requests")
+    .insert({ chat_id: chatId })
+    .select("id")
+    .maybeSingle();
+  if (error) {
+    dbLogError("help_requests insert", error);
+    return null;
+  }
+  return data?.id ?? null;
+}
+async function findOpenHelpRequest(chatId) {
+  const { data, error } = await supabase
+    .from("help_requests")
+    .select("id, chat_id, created_at, problem_text")
+    .eq("chat_id", chatId)
+    .is("problem_text", null)
+    .order("created_at", { ascending: false })
+    .limit(1);
+  if (error) {
+    dbLogError("help_requests select open", error);
+    return null;
+  }
+  return Array.isArray(data) ? data[0] ?? null : null;
+}
+async function closeHelpRequest(id, problemText) {
+  const { error } = await supabase
+    .from("help_requests")
+    .update({ problem_text: problemText })
+    .eq("id", id);
+  if (error) dbLogError("help_requests update problem_text", error);
+  return !error;
 }
 
 // ================= WEBHOOK (ВСЁ СЮДА) =================
@@ -699,10 +738,6 @@ app.post("/webhook", async (req, res) => {
   if (!msg) return;
 
   const chatId = msg.chat.id;
-
-if (msg.text === "/rule") {
-
-}
     
   // ================= START =================
   if (msg.text === "/start") {
@@ -711,6 +746,25 @@ if (msg.text === "/rule") {
         ...phoneRequestKeyboard()
       }
     });
+  }
+
+  // ================= HELP =================
+  if (
+    msg.text === HELP_MENU_TEXT ||
+    msg.text === "/help" ||
+    (typeof msg.text === "string" && msg.text.trim().startsWith("/help "))
+  ) {
+    await createHelpRequest(chatId);
+    await send(
+      chatId,
+      "Если у вас возникли проблемы — напишите, что случилось, и мы вам поможем.",
+      {
+        reply_markup: {
+          ...phoneRequestKeyboard()
+        }
+      }
+    );
+    return;
   }
 
   if (msg.text === SUBSCRIPTIONS_MENU_TEXT) {
@@ -732,6 +786,36 @@ if (msg.text === "/rule") {
 
     await sendSubscriptionsByPhone(chatId, existingUser.phone);
     return;
+  }
+
+    // Если пользователь открыл /help — следующее текстовое сообщение считаем описанием проблемы
+  if (typeof msg.text === "string" && msg.text.trim()) {
+    const openReq = await findOpenHelpRequest(chatId);
+    if (openReq?.id) {
+      const saved = await closeHelpRequest(openReq.id, msg.text.trim());
+      if (saved) {
+        await send(
+          chatId,
+          "✅ Спасибо! Сообщение принято. Мы свяжемся с вами в ближайшее время.",
+          {
+            reply_markup: {
+              ...phoneRequestKeyboard()
+            }
+          }
+        );
+      } else {
+        await send(
+          chatId,
+          "⚠️ Не удалось сохранить обращение. Попробуйте ещё раз или напишите администратору.",
+          {
+            reply_markup: {
+              ...phoneRequestKeyboard()
+            }
+          }
+        );
+      }
+      return;
+    }
   }
 
   let phoneInput = null;
