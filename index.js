@@ -162,56 +162,149 @@ async function fetchUserSubscriptionDetail(token, subscriptionId) {
   return d.userSubscription || d.subscription || d.data || d;
 }
 
-function parseClassApiPayload(d) {
-  if (d == null) return null;
-  if (Array.isArray(d)) {
-    const row = d[0];
-    if (row && typeof row.name === "string" && row.name.trim()) {
-      return row.name.trim();
-    }
-    return null;
+function stripRichText(value) {
+  if (typeof value !== "string") return "";
+  return value
+    .replace(/<[^>]+>/g, " ")
+    .replace(/\*\*/g, "")
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
+function pickTextField(obj, keys) {
+  if (!obj || typeof obj !== "object") return null;
+  for (const k of keys) {
+    const v = obj[k];
+    if (typeof v === "string" && v.trim()) return stripRichText(v);
   }
-  if (typeof d.name === "string" && d.name.trim()) return d.name.trim();
-  if (typeof d.class?.name === "string" && d.class.name.trim()) {
-    return d.class.name.trim();
-  }
-  if (d.data != null) return parseClassApiPayload(d.data);
-  if (d.classes != null) return parseClassApiPayload(d.classes);
   return null;
 }
 
-/** Группа (Class): GET /v1/company/classes/{id} или список ?classId= (см. OpenAPI МойКласс) */
-async function fetchClassNameById(token, classId, cache) {
+function parseClassObject(d) {
+  if (d == null) return null;
+  if (Array.isArray(d)) return d[0] ?? null;
+  if (Array.isArray(d.classes)) return d.classes[0] ?? null;
+  if (d.class && typeof d.class === "object") return d.class;
+  if (d.data && typeof d.data === "object") return parseClassObject(d.data);
+  if (d.id != null || d.name != null) return d;
+  return null;
+}
+
+/** Группа: GET /v1/company/classes/{id}?includeDescription=true */
+async function fetchClassById(token, classId, cache) {
   if (classId == null || classId === "") return null;
   const n = Number(classId);
   if (Number.isFinite(n) && n <= 0) return null;
 
-  const cacheKey = `class:${classId}`;
+  const cacheKey = `classObj:${classId}`;
   if (cache.has(cacheKey)) return cache.get(cacheKey);
 
   const headers = { "x-access-token": token };
+  const descQs = "includeDescription=true";
 
-  const byPath = `https://api.moyklass.com/v1/company/classes/${encodeURIComponent(classId)}`;
+  const byPath = `https://api.moyklass.com/v1/company/classes/${encodeURIComponent(classId)}?${descQs}`;
   let r = await fetch(byPath, { headers });
-  let name = null;
-  if (r.ok) {
-    name = parseClassApiPayload(await r.json().catch(() => null));
-  }
+  let cls = null;
+  if (r.ok) cls = parseClassObject(await r.json().catch(() => null));
 
-  if (!name) {
-    const byQuery = `https://api.moyklass.com/v1/company/classes?classId=${encodeURIComponent(classId)}`;
+  if (!cls) {
+    const byQuery = `https://api.moyklass.com/v1/company/classes?classId=${encodeURIComponent(classId)}&${descQs}`;
     r = await fetch(byQuery, { headers });
-    if (r.ok) {
-      name = parseClassApiPayload(await r.json().catch(() => null));
-    }
+    if (r.ok) cls = parseClassObject(await r.json().catch(() => null));
   }
 
-  if (name) {
-    cache.set(cacheKey, name);
-    return name;
+  cache.set(cacheKey, cls ?? null);
+  return cls;
+}
+
+async function fetchClassNameById(token, classId, cache) {
+  const cls = await fetchClassById(token, classId, cache);
+  const name = cls?.name;
+  return typeof name === "string" && name.trim() ? name.trim() : null;
+}
+
+/** Ведущий группы: managerIds → GET /v1/company/managers/{id} */
+async function fetchManagerNameById(token, managerId, cache) {
+  if (managerId == null || managerId === "") return null;
+  const cacheKey = `mgr:${managerId}`;
+  if (cache.has(cacheKey)) return cache.get(cacheKey);
+
+  const url = `https://api.moyklass.com/v1/company/managers/${encodeURIComponent(managerId)}`;
+  const r = await fetch(url, { headers: { "x-access-token": token } });
+  if (!r.ok) {
+    cache.set(cacheKey, null);
+    return null;
   }
-  cache.set(cacheKey, null);
-  return null;
+  const d = await r.json().catch(() => null);
+  const name =
+    d?.name ??
+    d?.manager?.name ??
+    (typeof d === "object" && d?.data?.name ? d.data.name : null);
+  const out = typeof name === "string" && name.trim() ? name.trim() : null;
+  cache.set(cacheKey, out);
+  return out;
+}
+
+async function resolveClassTeacherNames(token, classObj, cache) {
+  if (!classObj) return null;
+
+  const embedded =
+    classObj.manager?.name ??
+    classObj.teacher?.name ??
+    (Array.isArray(classObj.managers)
+      ? classObj.managers.map((m) => m?.name).filter(Boolean).join(", ")
+      : null);
+  if (embedded) return embedded;
+
+  let ids = classObj.managerIds;
+  if (!Array.isArray(ids) || !ids.length) {
+    const single = classObj.managerId ?? classObj.teacherId;
+    ids = single != null ? [single] : [];
+  }
+
+  const names = [];
+  for (const id of ids) {
+    const n = await fetchManagerNameById(token, id, cache);
+    if (n) names.push(n);
+  }
+  return names.length ? names.join(", ") : null;
+}
+
+/** Программа: GET /v1/company/courses?courseId= — описание, если у группы пусто */
+async function fetchCourseById(token, courseId, cache) {
+  if (courseId == null || courseId === "") return null;
+  const cacheKey = `course:${courseId}`;
+  if (cache.has(cacheKey)) return cache.get(cacheKey);
+
+  const url = `https://api.moyklass.com/v1/company/courses?courseId=${encodeURIComponent(courseId)}`;
+  const r = await fetch(url, { headers: { "x-access-token": token } });
+  if (!r.ok) {
+    cache.set(cacheKey, null);
+    return null;
+  }
+  const d = await r.json().catch(() => null);
+  let course = null;
+  if (Array.isArray(d)) course = d[0];
+  else if (Array.isArray(d?.courses)) course = d.courses[0];
+  else course = d?.course ?? d?.data ?? d;
+
+  cache.set(cacheKey, course ?? null);
+  return course;
+}
+
+/** Подробное описание группы → иначе описание программы (как в админке МойКласс) */
+function resolveLessonDaysText(classObj, courseObj) {
+  const fromClass = pickTextField(classObj, [
+    "description",
+    "fullDescription",
+    "detailDescription"
+  ]);
+  if (fromClass) return fromClass;
+
+  const fromCourse = pickTextField(courseObj, ["description", "shortDescription"]);
+  if (fromCourse) return fromCourse;
+
+  return pickTextField(classObj, ["comment"]);
 }
 
 function parseSubscriptionCatalogPayload(d) {
@@ -431,7 +524,7 @@ function pickGroupTitle(s) {
   return null;
 }
 
-async function resolveSubscriptionForDisplay(token, s, nameCache) {
+async function resolveSubscriptionForDisplay(token, s, cache) {
   let merged = { ...s };
   const detail = await fetchUserSubscriptionDetail(token, s.id);
   if (detail && typeof detail === "object") {
@@ -440,10 +533,19 @@ async function resolveSubscriptionForDisplay(token, s, nameCache) {
 
   const remaining = computeRemainingLessons(merged);
   let groupTitle = pickGroupTitle(merged);
+  let classObj = null;
+
+  for (const cid of collectClassIds(merged)) {
+    classObj = await fetchClassById(token, cid, cache);
+    if (classObj) {
+      if (!groupTitle && classObj.name) groupTitle = String(classObj.name).trim();
+      break;
+    }
+  }
 
   if (!groupTitle) {
     for (const cid of collectClassIds(merged)) {
-      groupTitle = await fetchClassNameById(token, cid, nameCache);
+      groupTitle = await fetchClassNameById(token, cid, cache);
       if (groupTitle) break;
     }
   }
@@ -451,14 +553,28 @@ async function resolveSubscriptionForDisplay(token, s, nameCache) {
     groupTitle = await fetchSubscriptionCatalogName(
       token,
       merged.subscriptionId,
-      nameCache
+      cache
     );
+  }
+
+  let teacher = null;
+  let lessonDays = null;
+  if (classObj) {
+    teacher = await resolveClassTeacherNames(token, classObj, cache);
+    const courseId =
+      classObj.courseId ?? merged.courseId ?? merged.mainCourseId;
+    const courseObj = courseId
+      ? await fetchCourseById(token, courseId, cache)
+      : null;
+    lessonDays = resolveLessonDaysText(classObj, courseObj);
   }
 
   return {
     merged,
     remaining,
-    groupTitle: groupTitle || "—"
+    groupTitle: groupTitle || "—",
+    teacher: teacher || "—",
+    lessonDays: lessonDays || "—"
   };
 }
 
@@ -552,7 +668,7 @@ async function sendSubscriptionsByPhone(chatId, phoneDigits, opts = {}) {
 
   const subs = await getSubs(user.id);
   if (!subs.length) {
-    await send(chatId, "❌ У вас нет активных абонементов", {
+    await send(chatId, "❌ Нет активных абонементов", {
       reply_markup: mainMenuKeyboard()
     });
     return;
@@ -565,17 +681,15 @@ async function sendSubscriptionsByPhone(chatId, phoneDigits, opts = {}) {
   const buttons = [];
 
   for (const s of subs) {
-    const { merged, remaining, groupTitle } = await resolveSubscriptionForDisplay(
-      token,
-      s,
-      nameCache
-    );
+    const { merged, remaining, groupTitle, teacher, lessonDays } =
+      await resolveSubscriptionForDisplay(token, s, nameCache);
 
     const endRaw = subscriptionEndDate(merged);
     const until = new Date(endRaw).toLocaleDateString("ru-RU");
 
     text += `📌 Абонемент\n`;
-    text += `Название группы где вы занимаетесь: ${groupTitle}\n`;
+    text += `Преподаватель: ${teacher}\n`;
+    text += `Дни занятий группы: ${lessonDays}\n`;
     text += `${formatRemainingLessons(remaining)}\n`;
     text += `Абонемент действует до: ${until}\n\n`;
     text += `⏰ Если вам нужно напоминание об окончании Абонемента, выберите удобное время ниже что бы мы могли вам прислать уведомление\n`;
