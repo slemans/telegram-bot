@@ -632,6 +632,107 @@ function isTelegramCommand(text, cmd) {
   return re.test(text.trim());
 }
 
+/** callback_data: t_{subscriptionId}_{hour} — id может содержать «_» */
+function parseNotifyTimeCallback(data) {
+  const m = String(data).match(/^t_(.+)_(\d{1,2})$/);
+  if (!m) return null;
+  const hour = parseInt(m[2], 10);
+  if (Number.isNaN(hour) || hour < 0 || hour > 23) return null;
+  return { subId: m[1], hour };
+}
+
+function parseNotifyOffCallback(data) {
+  const m = String(data).match(/^n_(.+)_off$/);
+  return m ? { subId: m[1] } : null;
+}
+
+/** Сохранить/обновить абонемент в Supabase (нужно для кнопок напоминаний). */
+async function upsertSubscriptionRow(chatId, sourceSub, cache) {
+  const subIdStr = String(sourceSub.id);
+  const token = await getToken();
+  const { merged, remaining, groupTitle } = await resolveSubscriptionForDisplay(
+    token,
+    sourceSub,
+    cache
+  );
+  const endRaw = subscriptionEndDate(merged);
+  if (!endRaw) {
+    console.error("SUBSCRIPTIONS UPSERT: нет end_date", subIdStr);
+    return false;
+  }
+
+  const { data: prevRows, error: prevSelErr } = await supabase
+    .from("subscriptions")
+    .select("notify_enabled, notify_time")
+    .eq("external_id", subIdStr)
+    .limit(1);
+  if (prevSelErr) dbLogError("subscriptions pre-select", prevSelErr);
+  const prev = Array.isArray(prevRows) ? prevRows[0] : null;
+
+  const nameForDb = groupTitle !== "—" ? groupTitle : merged.name ?? null;
+  const upsertRow = {
+    external_id: subIdStr,
+    chat_id: chatId,
+    name: nameForDb,
+    end_date: endRaw,
+    remaining: remaining ?? pickRemainingVisits(merged),
+    active: true
+  };
+  if (prev) {
+    if (prev.notify_enabled != null) {
+      upsertRow.notify_enabled = prev.notify_enabled;
+    }
+    if (prev.notify_time != null && prev.notify_time !== "") {
+      upsertRow.notify_time = prev.notify_time;
+    }
+  }
+
+  const { error } = await supabase
+    .from("subscriptions")
+    .upsert(upsertRow, { onConflict: "external_id" });
+  if (error) {
+    dbLogError("subscriptions upsert", error);
+    return false;
+  }
+  return true;
+}
+
+async function ensureSubscriptionInDb(chatId, subId, cache = new Map()) {
+  const subIdStr = String(subId);
+  const { data: existing, error: selErr } = await supabase
+    .from("subscriptions")
+    .select("external_id")
+    .eq("external_id", subIdStr)
+    .maybeSingle();
+  if (selErr) dbLogError("subscriptions ensure select", selErr);
+  if (existing?.external_id) return true;
+
+  const token = await getToken();
+  const detail = await fetchUserSubscriptionDetail(token, subIdStr);
+  if (!detail) return false;
+  return upsertSubscriptionRow(chatId, { id: subIdStr, ...detail }, cache);
+}
+
+async function setSubscriptionNotify(chatId, subId, { enabled, hour }) {
+  const cache = new Map();
+  const ensured = await ensureSubscriptionInDb(chatId, subId, cache);
+  if (!ensured) return { ok: false, reason: "ensure" };
+
+  const patch = { notify_enabled: enabled };
+  if (hour != null) patch.notify_time = hour;
+
+  const { error } = await supabase
+    .from("subscriptions")
+    .update(patch)
+    .eq("external_id", String(subId));
+
+  if (error) {
+    dbLogError("subscriptions notify update", error);
+    return { ok: false, reason: "update" };
+  }
+  return { ok: true };
+}
+
 async function sendSubscriptionsByPhone(chatId, phoneDigits, opts = {}) {
   const phone = String(phoneDigits).replace(/\D/g, "");
   const user = await findUser(phone);
@@ -702,41 +803,7 @@ async function sendSubscriptionsByPhone(chatId, phoneDigits, opts = {}) {
       { text: "🔕 Выкл", callback_data: `n_${subIdStr}_off` }
     ]);
 
-    const nameForDb = groupTitle !== "—" ? groupTitle : merged.name ?? null;
-
-    const { data: prevRows, error: prevSelErr } = await supabase
-      .from("subscriptions")
-      .select("notify_enabled, notify_time")
-      .eq("external_id", subIdStr)
-      .limit(1);
-    if (prevSelErr) {
-      console.error("SUBSCRIPTIONS PRE-UPSERT SELECT:", prevSelErr);
-    }
-    const prev = Array.isArray(prevRows) ? prevRows[0] : null;
-
-    const upsertRow = {
-      external_id: subIdStr,
-      chat_id: chatId,
-      name: nameForDb,
-      end_date: endRaw,
-      remaining: remaining ?? pickRemainingVisits(merged),
-      active: true
-    };
-    if (prev) {
-      if (prev.notify_enabled != null) {
-        upsertRow.notify_enabled = prev.notify_enabled;
-      }
-      if (prev.notify_time != null && prev.notify_time !== "") {
-        upsertRow.notify_time = prev.notify_time;
-      }
-    }
-
-    const { data, error } = await supabase
-      .from("subscriptions")
-      .upsert(upsertRow, { onConflict: "external_id" })
-      .select();
-
-    console.log("SUPABASE:", data, error);
+    await upsertSubscriptionRow(chatId, { ...s, id: subIdStr }, nameCache);
   }
 
   await send(chatId, text, {
@@ -853,100 +920,78 @@ app.post("/webhook", async (req, res) => {
       return;
     }
 
-    const cancelMatch = data.match(/^n_(.+)_off$/);
-    if (cancelMatch) {
-      const subId = String(cancelMatch[1]);
-      const { error } = await supabase
-        .from("subscriptions")
-        .update({ notify_enabled: false })
-        .eq("external_id", subId);
+    const offParsed = parseNotifyOffCallback(data);
+    if (offParsed) {
+      const subId = String(offParsed.subId);
+      if (callbackChatId == null) return;
 
-      console.log("NOTIFY OFF:", subId, error);
-      if (callbackChatId != null) {
+      const result = await setSubscriptionNotify(callbackChatId, subId, {
+        enabled: false
+      });
+      if (!result.ok) {
         await send(
           callbackChatId,
-          "🔕 Напоминания по этому абонементу отключены."
+          "⚠️ Не удалось отключить напоминание. Откройте «🎫 Абонименты» и попробуйте снова."
         );
+        return;
       }
+      await send(
+        callbackChatId,
+        "🔕 Напоминания по этому абонементу отключены."
+      );
       return;
     }
 
-    const parts = data.split("_");
-    if (parts[0] === "t" && parts.length >= 3) {
-      const subId = String(parts[1]);
-      const selectedTime = parseInt(parts[2], 10);
-
-      if (Number.isNaN(selectedTime)) {
-        if (callbackChatId != null) {
-          await send(callbackChatId, "❌ Некорректное время. Выберите кнопку ещё раз.");
-        }
-        return;
-      }
+    const timeParsed = parseNotifyTimeCallback(data);
+    if (timeParsed) {
+      const subId = String(timeParsed.subId);
+      const selectedTime = timeParsed.hour;
+      if (callbackChatId == null) return;
 
       const { data: current, error: currentErr } = await supabase
         .from("subscriptions")
         .select("notify_enabled, notify_time")
-        .eq("external_id", String(subId))
+        .eq("external_id", subId)
         .maybeSingle();
 
       if (currentErr) {
-        console.error("CALLBACK SELECT:", currentErr);
-        if (callbackChatId != null) {
-          await send(
-            callbackChatId,
-            "⚠️ Ошибка при чтении настроек. Попробуйте через минуту или откройте «🎫 Абонименты» снова."
-          );
-        }
+        dbLogError("CALLBACK SELECT", currentErr);
+        await send(
+          callbackChatId,
+          "⚠️ Ошибка при чтении настроек. Попробуйте через минуту или откройте «🎫 Абонименты» снова."
+        );
         return;
       }
 
       if (current?.notify_enabled && Number(current.notify_time) === selectedTime) {
-        if (callbackChatId != null) {
-          await send(
-            callbackChatId,
-            `ℹ️ Уведомление уже включено на ${selectedTime}:00.`
-          );
-        }
+        await send(
+          callbackChatId,
+          `ℹ️ Уведомление уже включено на ${selectedTime}:00.`
+        );
         return;
       }
 
-      const { data: updatedRows, error } = await supabase
-        .from("subscriptions")
-        .update({
-          notify_enabled: true,
-          notify_time: selectedTime
-        })
-        .eq("external_id", subId)
-        .select("external_id");
+      const result = await setSubscriptionNotify(callbackChatId, subId, {
+        enabled: true,
+        hour: selectedTime
+      });
 
-      if (error) {
-        console.error("CALLBACK UPDATE:", error);
-        if (callbackChatId != null) {
-          await send(callbackChatId, "❌ Не удалось сохранить время. Попробуйте ещё раз.");
-        }
-        return;
-      }
-
-      if (!updatedRows?.length) {
-        console.error("CALLBACK UPDATE: 0 rows", subId);
-        if (callbackChatId != null) {
-          await send(
-            callbackChatId,
-            "⚠️ Не удалось сохранить время напоминания: в базе нет строки абонемента. Нажмите «🎫 Абонименты» (или отправьте телефон), затем снова выберите время."
-          );
-        }
+      if (!result.ok) {
+        console.error("CALLBACK NOTIFY:", result.reason, subId);
+        await send(
+          callbackChatId,
+          "⚠️ Не удалось сохранить время напоминания. Откройте «🎫 Абонименты» ещё раз. Если не помогает — проверьте доступ к таблице subscriptions в Supabase (RLS)."
+        );
         return;
       }
 
       if (current?.notify_enabled && Number.isFinite(Number(current.notify_time))) {
         const prevTime = Number(current.notify_time);
-        if (callbackChatId != null) {
-          await send(
-            callbackChatId,
-            `🔁 Время уведомления изменено: ${prevTime}:00 → ${selectedTime}:00`
-          );
-        }
-      } else if (callbackChatId != null) {
+        await send(
+          callbackChatId,
+          `🔁 Время уведомления изменено: ${prevTime}:00 → ${selectedTime}:00`
+        );
+      } else {
         await send(
           callbackChatId,
           `🔔 Уведомления об окончании абонемента включены, отправка за 3 дня до окончания в: ${selectedTime}:00`
