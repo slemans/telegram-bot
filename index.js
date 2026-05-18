@@ -552,7 +552,7 @@ async function sendSubscriptionsByPhone(chatId, phoneDigits, opts = {}) {
 
   const subs = await getSubs(user.id);
   if (!subs.length) {
-    await send(chatId, "❌ Нет активных абонементов", {
+    await send(chatId, "❌ У вас нет активных абонементов", {
       reply_markup: mainMenuKeyboard()
     });
     return;
