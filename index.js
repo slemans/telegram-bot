@@ -464,6 +464,9 @@ async function resolveSubscriptionForDisplay(token, s, nameCache) {
 
 const SUBSCRIPTIONS_MENU_TEXT = "🎫 Абонименты";
 const HELP_MENU_TEXT = "🆘 Помощь";
+const RULE_STUDIO_MENU_TEXT = "Правила посещения студии";
+const RULE_VISITS_MENU_TEXT =
+  "Правила пользования абонементом и отработки";
 const LEGACY_HELP_MENU_TEXT = "/help помощь";
 const CONTACT_SHARE_LABEL = "📞 Поделится моим номером телефона";
 
@@ -471,6 +474,8 @@ function mainMenuKeyboard() {
   return {
     keyboard: [
       [{ text: SUBSCRIPTIONS_MENU_TEXT }],
+      [{ text: RULE_STUDIO_MENU_TEXT }],
+      [{ text: RULE_VISITS_MENU_TEXT }],
       [{ text: HELP_MENU_TEXT }]
     ],
     resize_keyboard: true
@@ -626,6 +631,37 @@ async function sendSubscriptionsByPhone(chatId, phoneDigits, opts = {}) {
   if (opts.restoreMainMenu) {
     await ensureMainMenu(chatId);
   }
+}
+
+// ================= RULES (SUPABASE) =================
+async function fetchRulesConfig() {
+  const { data, error } = await supabase
+    .from("ruleStudio")
+    .select("ruleStudio, ruleVisits")
+    .eq("id", 1)
+    .maybeSingle();
+
+  if (error) dbLogError("ruleStudio select", error);
+  return data;
+}
+
+async function sendRuleMessage(chatId, field) {
+  const row = await fetchRulesConfig();
+  const text =
+    field === "studio"
+      ? row?.ruleStudio?.trim()
+      : row?.ruleVisits?.trim();
+
+  if (!text) {
+    await send(
+      chatId,
+      "⚠️ Текст правил пока не добавлен в базу. Обратитесь к администратору.",
+      { reply_markup: mainMenuKeyboard() }
+    );
+    return;
+  }
+
+  await send(chatId, text, { reply_markup: mainMenuKeyboard() });
 }
 
 // ================= HELP (SUPABASE) =================
@@ -863,6 +899,16 @@ app.post("/webhook", async (req, res) => {
     }
 
     await sendSubscriptionsByPhone(chatId, existingUser.phone);
+    return;
+  }
+
+  if (msg.text === RULE_STUDIO_MENU_TEXT) {
+    await sendRuleMessage(chatId, "studio");
+    return;
+  }
+
+  if (msg.text === RULE_VISITS_MENU_TEXT) {
+    await sendRuleMessage(chatId, "visits");
     return;
   }
 
