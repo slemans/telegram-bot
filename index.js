@@ -713,6 +713,33 @@ async function ensureSubscriptionInDb(chatId, subId, cache = new Map()) {
   return upsertSubscriptionRow(chatId, { id: subIdStr, ...detail }, cache);
 }
 
+async function upsertUserByChatId(chatId, phone, name) {
+  const phoneNorm = String(phone).replace(/\D/g, "");
+  const { error } = await supabase.from("users").upsert(
+    {
+      chat_id: chatId,
+      phone: phoneNorm,
+      name: name ?? null
+    },
+    { onConflict: "chat_id" }
+  );
+  if (error) {
+    dbLogError("users upsert", error);
+    return false;
+  }
+  return true;
+}
+
+async function getStoredPhoneForChat(chatId) {
+  const { data, error } = await supabase
+    .from("users")
+    .select("phone")
+    .eq("chat_id", chatId)
+    .maybeSingle();
+  if (error) dbLogError("users select phone", error);
+  return data?.phone ? String(data.phone) : null;
+}
+
 async function setSubscriptionNotify(chatId, subId, { enabled, hour }) {
   const cache = new Map();
   const ensured = await ensureSubscriptionInDb(chatId, subId, cache);
@@ -733,6 +760,75 @@ async function setSubscriptionNotify(chatId, subId, { enabled, hour }) {
   return { ok: true };
 }
 
+function appendSubscriptionBlock(text, { teacher, lessonDays, remaining, until }) {
+  let out = text;
+  out += `📌 Абонемент\n`;
+  out += `Преподаватель: ${teacher}\n`;
+  out += `Дни занятий группы: ${lessonDays}\n`;
+  out += `${formatRemainingLessons(remaining)}\n`;
+  out += `Абонемент действует до: ${until}\n\n`;
+  out += `⏰ Если вам нужно напоминание об окончании Абонемента, выберите удобное время ниже что бы мы могли вам прислать уведомление\n`;
+  return out;
+}
+
+function notifyTimeButtons(subIdStr) {
+  return [
+    { text: "🕙 10:00", callback_data: `t_${subIdStr}_10` },
+    { text: "🕑 14:00", callback_data: `t_${subIdStr}_14` },
+    { text: "🌙 20:00", callback_data: `t_${subIdStr}_20` },
+    { text: "🔕 Выкл", callback_data: `n_${subIdStr}_off` }
+  ];
+}
+
+/** Показать абонементы по id из Supabase (если users не сохранился, но subscriptions есть). */
+async function sendSubscriptionsFromStoredIds(chatId, externalIds) {
+  const token = await getToken();
+  const nameCache = new Map();
+  const buttons = [];
+  let text = `🎫 Активные абонементы:\n\n`;
+  let clientName = null;
+
+  for (const extId of externalIds) {
+    const subIdStr = String(extId);
+    const detail = await fetchUserSubscriptionDetail(token, subIdStr);
+    if (!detail) continue;
+
+    const source = { id: subIdStr, ...detail };
+    const { merged, remaining, teacher, lessonDays } =
+      await resolveSubscriptionForDisplay(token, source, nameCache);
+    const endRaw = subscriptionEndDate(merged);
+    if (!endRaw) continue;
+
+    if (!clientName) {
+      clientName =
+        detail.userName ??
+        detail.user?.name ??
+        merged.userName ??
+        null;
+    }
+
+    const until = new Date(endRaw).toLocaleDateString("ru-RU");
+    text = appendSubscriptionBlock(text, {
+      teacher,
+      lessonDays,
+      remaining,
+      until
+    });
+    buttons.push(notifyTimeButtons(subIdStr));
+    await upsertSubscriptionRow(chatId, source, nameCache);
+  }
+
+  if (!buttons.length) return false;
+
+  const header = clientName
+    ? `✅ Клиент найден: ${clientName}\n\n`
+    : "";
+  await send(chatId, header + text, {
+    reply_markup: { inline_keyboard: buttons }
+  });
+  return true;
+}
+
 async function sendSubscriptionsByPhone(chatId, phoneDigits, opts = {}) {
   const phone = String(phoneDigits).replace(/\D/g, "");
   const user = await findUser(phone);
@@ -744,28 +840,7 @@ async function sendSubscriptionsByPhone(chatId, phoneDigits, opts = {}) {
     return;
   }
 
-  const { data: existingUser } = await supabase
-    .from("users")
-    .select("chat_id")
-    .eq("chat_id", chatId)
-    .maybeSingle();
-
-  if (!existingUser) {
-    const { error } = await supabase
-      .from("users")
-      .insert({
-        chat_id: chatId,
-        phone,
-        name: user.name
-      });
-    console.log("USER INSERT:", error);
-  } else {
-    const { error } = await supabase
-      .from("users")
-      .update({ phone, name: user.name })
-      .eq("chat_id", chatId);
-    console.log("USER UPDATE:", error);
-  }
+  await upsertUserByChatId(chatId, phone, user.name);
 
   const subs = await getSubs(user.id);
   if (!subs.length) {
@@ -782,27 +857,21 @@ async function sendSubscriptionsByPhone(chatId, phoneDigits, opts = {}) {
   const buttons = [];
 
   for (const s of subs) {
-    const { merged, remaining, groupTitle, teacher, lessonDays } =
+    const { merged, remaining, teacher, lessonDays } =
       await resolveSubscriptionForDisplay(token, s, nameCache);
 
     const endRaw = subscriptionEndDate(merged);
     const until = new Date(endRaw).toLocaleDateString("ru-RU");
 
-    text += `📌 Абонемент\n`;
-    text += `Преподаватель: ${teacher}\n`;
-    text += `Дни занятий группы: ${lessonDays}\n`;
-    text += `${formatRemainingLessons(remaining)}\n`;
-    text += `Абонемент действует до: ${until}\n\n`;
-    text += `⏰ Если вам нужно напоминание об окончании Абонемента, выберите удобное время ниже что бы мы могли вам прислать уведомление\n`;
+    text = appendSubscriptionBlock(text, {
+      teacher,
+      lessonDays,
+      remaining,
+      until
+    });
 
     const subIdStr = String(s.id);
-    buttons.push([
-      { text: "🕙 10:00", callback_data: `t_${subIdStr}_10` },
-      { text: "🕑 14:00", callback_data: `t_${subIdStr}_14` },
-      { text: "🌙 20:00", callback_data: `t_${subIdStr}_20` },
-      { text: "🔕 Выкл", callback_data: `n_${subIdStr}_off` }
-    ]);
-
+    buttons.push(notifyTimeButtons(subIdStr));
     await upsertSubscriptionRow(chatId, { ...s, id: subIdStr }, nameCache);
   }
 
@@ -812,6 +881,40 @@ async function sendSubscriptionsByPhone(chatId, phoneDigits, opts = {}) {
   if (opts.restoreMainMenu) {
     await ensureMainMenu(chatId);
   }
+}
+
+/** «Абонименты»: телефон из users или уже сохранённые subscriptions. */
+async function sendSubscriptionsForChat(chatId) {
+  const phone = await getStoredPhoneForChat(chatId);
+  if (phone) {
+    await sendSubscriptionsByPhone(chatId, phone);
+    return;
+  }
+
+  const { data: subsRows, error: subsErr } = await supabase
+    .from("subscriptions")
+    .select("external_id")
+    .eq("chat_id", chatId)
+    .eq("active", true);
+  dbLogError("subscriptions select by chat_id", subsErr);
+
+  const ids = [
+    ...new Set(
+      (subsRows ?? [])
+        .map((r) => r.external_id)
+        .filter((id) => id != null && id !== "")
+    )
+  ];
+
+  if (ids.length) {
+    const ok = await sendSubscriptionsFromStoredIds(chatId, ids);
+    if (ok) return;
+  }
+
+  await promptPhoneCollection(
+    chatId,
+    "📲 Сначала отправьте номер телефона, чтобы мы смогли найти ваши абонементы"
+  );
 }
 
 // ================= RULES (SUPABASE) =================
@@ -1042,22 +1145,7 @@ app.post("/webhook", async (req, res) => {
   }
 
   if (msg.text === SUBSCRIPTIONS_MENU_TEXT) {
-    const { data: existingUser, error } = await supabase
-      .from("users")
-      .select("phone")
-      .eq("chat_id", chatId)
-      .maybeSingle();
-    dbLogError("users select by chat_id", error);
-
-    if (!existingUser?.phone) {
-      await promptPhoneCollection(
-        chatId,
-        "📲 Сначала отправьте номер телефона, чтобы мы смогли найти ваши абонементы"
-      );
-      return;
-    }
-
-    await sendSubscriptionsByPhone(chatId, existingUser.phone);
+    await sendSubscriptionsForChat(chatId);
     return;
   }
 
@@ -1201,6 +1289,10 @@ async function runNotificationsJob() {
     }
 
     if (!subs || subs.length === 0) {
+      console.log(
+        "JOB: нет абонементов с notify_enabled и notify_time=",
+        hour
+      );
       return stats;
     }
 
@@ -1246,6 +1338,11 @@ async function runNotificationsJob() {
       ") notify_time=",
       hour
     );
+    if (subsInWindow === 0) {
+      console.log(
+        "JOB: напоминания не отправлены — ни один абонемент не попадает в окно 1–3 дня до окончания (см. SKIP вне окна выше)"
+      );
+    }
 
     for (const [chKey, items] of byChat) {
       const chatId = items[0].s.chat_id;
@@ -1295,6 +1392,9 @@ async function runNotificationsJob() {
           continue;
         }
         dbLogError(`notifications_log reserve chat ${chKey}`, reserveErr);
+        console.error(
+          "JOB: Telegram не отправлен — выполните scripts/notifications_log_policies.sql в Supabase"
+        );
         continue;
       }
 
