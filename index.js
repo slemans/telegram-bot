@@ -578,7 +578,7 @@ async function resolveSubscriptionForDisplay(token, s, cache) {
   };
 }
 
-const SUBSCRIPTIONS_MENU_TEXT = "🎫 Абонименты";
+const SUBSCRIPTIONS_MENU_TEXT = "🎫 Абонементы";
 const HELP_MENU_TEXT = "🆘 Помощь";
 const RULE_STUDIO_MENU_TEXT = "Правила посещения студии";
 const RULE_VISITS_MENU_TEXT =
@@ -883,7 +883,7 @@ async function sendSubscriptionsByPhone(chatId, phoneDigits, opts = {}) {
   }
 }
 
-/** «Абонименты»: телефон из users или уже сохранённые subscriptions. */
+/** «Абонементы»: телефон из users или уже сохранённые subscriptions. */
 async function sendSubscriptionsForChat(chatId) {
   const phone = await getStoredPhoneForChat(chatId);
   if (phone) {
@@ -1034,7 +1034,7 @@ app.post("/webhook", async (req, res) => {
       if (!result.ok) {
         await send(
           callbackChatId,
-          "⚠️ Не удалось отключить напоминание. Откройте «🎫 Абонименты» и попробуйте снова."
+          "⚠️ Не удалось отключить напоминание. Откройте «🎫 Абонементы» и попробуйте снова."
         );
         return;
       }
@@ -1061,7 +1061,7 @@ app.post("/webhook", async (req, res) => {
         dbLogError("CALLBACK SELECT", currentErr);
         await send(
           callbackChatId,
-          "⚠️ Ошибка при чтении настроек. Попробуйте через минуту или откройте «🎫 Абонименты» снова."
+          "⚠️ Ошибка при чтении настроек. Попробуйте через минуту или откройте «🎫 Абонементы» снова."
         );
         return;
       }
@@ -1083,7 +1083,7 @@ app.post("/webhook", async (req, res) => {
         console.error("CALLBACK NOTIFY:", result.reason, subId);
         await send(
           callbackChatId,
-          "⚠️ Не удалось сохранить время напоминания. Откройте «🎫 Абонименты» ещё раз. Если не помогает — проверьте доступ к таблице subscriptions в Supabase (RLS)."
+          "⚠️ Не удалось сохранить время напоминания. Откройте «🎫 Абонементы» ещё раз. Если не помогает — проверьте доступ к таблице subscriptions в Supabase (RLS)."
         );
         return;
       }
