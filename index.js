@@ -424,7 +424,7 @@ function formatMonthlyWorkoffLabel(classObj) {
   if (n != null) return String(n);
 
   const wo = getWorkOffSettings(classObj);
-  if (wo && wo.limitWorkOffCount === false) return "без ограничения";
+  if (wo && wo.limitWorkOffCount === false) return "Нет данных, обратитесь к администратору";
 
   return "—";
 }
