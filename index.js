@@ -190,6 +190,56 @@ function parseClassObject(d) {
   return null;
 }
 
+function normalizeMonthlyWorkoffValue(value) {
+  if (value == null || value === "" || Number.isNaN(Number(value))) return null;
+  const n = Math.floor(Number(value));
+  if (n < 0) return null;
+  // В МойКласс 2147483647 = «без ограничения».
+  if (n >= 2147483640) return null;
+  return n;
+}
+
+function mergeWorkOffFields(target, source) {
+  if (!target || !source || typeof source !== "object") return target;
+  if (source.workOff && typeof source.workOff === "object") {
+    target.workOff = { ...(target.workOff || {}), ...source.workOff };
+  }
+  if (source.params?.workOff && typeof source.params.workOff === "object") {
+    target.params = {
+      ...(target.params || {}),
+      ...(source.params || {}),
+      workOff: { ...(target.params?.workOff || {}), ...source.params.workOff }
+    };
+  }
+  return target;
+}
+
+function normalizeClassFromRaw(raw) {
+  const roots = [
+    raw,
+    raw?.class,
+    raw?.data,
+    Array.isArray(raw) ? raw[0] : null,
+    Array.isArray(raw?.classes) ? raw.classes[0] : null
+  ];
+
+  let cls = null;
+  for (const root of roots) {
+    if (!root || typeof root !== "object") continue;
+    const parsed = parseClassObject(root);
+    if (!parsed) continue;
+    cls = cls ? mergeWorkOffFields({ ...cls }, parsed) : { ...parsed };
+    mergeWorkOffFields(cls, root);
+  }
+  return cls;
+}
+
+function findClassInCourse(course, classId) {
+  if (!course || !Array.isArray(course.classes)) return null;
+  const wanted = String(classId);
+  return course.classes.find((c) => c && String(c.id) === wanted) ?? null;
+}
+
 /** Группа: GET /v1/company/classes/{id}?includeDescription=true */
 async function fetchClassById(token, classId, cache) {
   if (classId == null || classId === "") return null;
@@ -205,12 +255,12 @@ async function fetchClassById(token, classId, cache) {
   const byPath = `https://api.moyklass.com/v1/company/classes/${encodeURIComponent(classId)}?${descQs}`;
   let r = await fetch(byPath, { headers });
   let cls = null;
-  if (r.ok) cls = parseClassObject(await r.json().catch(() => null));
+  if (r.ok) cls = normalizeClassFromRaw(await r.json().catch(() => null));
 
   if (!cls) {
     const byQuery = `https://api.moyklass.com/v1/company/classes?classId=${encodeURIComponent(classId)}&${descQs}`;
     r = await fetch(byQuery, { headers });
-    if (r.ok) cls = parseClassObject(await r.json().catch(() => null));
+    if (r.ok) cls = normalizeClassFromRaw(await r.json().catch(() => null));
   }
 
   cache.set(cacheKey, cls ?? null);
@@ -271,12 +321,14 @@ async function resolveClassTeacherNames(token, classObj, cache) {
 }
 
 /** Программа: GET /v1/company/courses?courseId= — описание, если у группы пусто */
-async function fetchCourseById(token, courseId, cache) {
+async function fetchCourseById(token, courseId, cache, opts = {}) {
   if (courseId == null || courseId === "") return null;
-  const cacheKey = `course:${courseId}`;
+  const withClasses = Boolean(opts.includeClasses);
+  const cacheKey = `course:${courseId}:${withClasses ? "classes" : "plain"}`;
   if (cache.has(cacheKey)) return cache.get(cacheKey);
 
-  const url = `https://api.moyklass.com/v1/company/courses?courseId=${encodeURIComponent(courseId)}`;
+  const qs = withClasses ? "includeClasses=true&" : "";
+  const url = `https://api.moyklass.com/v1/company/courses?${qs}courseId=${encodeURIComponent(courseId)}`;
   const r = await fetch(url, { headers: { "x-access-token": token } });
   if (!r.ok) {
     cache.set(cacheKey, null);
@@ -310,29 +362,16 @@ function resolveLessonDaysText(classObj, courseObj) {
 function pickMonthlyWorkoffCount(classObj) {
   if (!classObj || typeof classObj !== "object") return null;
 
-  const direct = [
+  const candidates = [
+    classObj.params?.workOff?.maxWorkOffCount,
+    classObj.workOff?.maxWorkOffCount,
     classObj.workOffCountPerMonth,
     classObj.monthWorkOffCount,
     classObj.maxWorkOffCountPerMonth
   ];
-  for (const v of direct) {
-    if (v != null && v !== "" && !Number.isNaN(Number(v))) {
-      return Math.max(0, Math.floor(Number(v)));
-    }
-  }
-
-  const nested = classObj.workOff?.maxWorkOffCount;
-  if (nested != null && nested !== "" && !Number.isNaN(Number(nested))) {
-    return Math.max(0, Math.floor(Number(nested)));
-  }
-
-  const nestedParams = classObj.params?.workOff?.maxWorkOffCount;
-  if (
-    nestedParams != null &&
-    nestedParams !== "" &&
-    !Number.isNaN(Number(nestedParams))
-  ) {
-    return Math.max(0, Math.floor(Number(nestedParams)));
+  for (const v of candidates) {
+    const n = normalizeMonthlyWorkoffValue(v);
+    if (n != null) return n;
   }
 
   // Часто хранится как признак группы (attributes) в МойКласс.
@@ -342,22 +381,48 @@ function pickMonthlyWorkoffCount(classObj) {
       if (!/отработ|work.?off|make.?up/.test(key)) continue;
       if (!/месяц|month/.test(key)) continue;
 
-      const value = attr?.value ?? attr?.valueId;
-      if (value != null && value !== "" && !Number.isNaN(Number(value))) {
-        return Math.max(0, Math.floor(Number(value)));
-      }
+      const n = normalizeMonthlyWorkoffValue(attr?.value ?? attr?.valueId);
+      if (n != null) return n;
     }
   }
 
-  // Дополнительный fallback по "плоским" ключам в объекте группы.
-  for (const [k, v] of Object.entries(classObj)) {
-    const key = String(k).toLowerCase();
-    if (!/отработ|work.?off|make.?up/.test(key)) continue;
-    if (!/месяц|month/.test(key)) continue;
-    if (v != null && v !== "" && !Number.isNaN(Number(v))) {
-      return Math.max(0, Math.floor(Number(v)));
+  return null;
+}
+
+async function resolveMonthlyWorkoffCount(token, merged, classObj, cache) {
+  const classIds = collectClassIds(merged);
+  const sources = [classObj, merged?.lessonClass, merged?.class, merged?.group];
+
+  for (const src of sources) {
+    const n = pickMonthlyWorkoffCount(src);
+    if (n != null) return n;
+  }
+
+  for (const cid of classIds) {
+    const cls = await fetchClassById(token, cid, cache);
+    const n = pickMonthlyWorkoffCount(cls);
+    if (n != null) return n;
+  }
+
+  const courseIds = new Set();
+  for (const cid of classIds) {
+    const cls = await fetchClassById(token, cid, cache);
+    if (cls?.courseId != null) courseIds.add(cls.courseId);
+  }
+  if (merged.courseId != null) courseIds.add(merged.courseId);
+  if (merged.mainCourseId != null) courseIds.add(merged.mainCourseId);
+
+  for (const courseId of courseIds) {
+    const course = await fetchCourseById(token, courseId, cache, {
+      includeClasses: true
+    });
+    for (const cid of classIds) {
+      const clsFromCourse = findClassInCourse(course, cid);
+      const n = pickMonthlyWorkoffCount(clsFromCourse);
+      if (n != null) return n;
     }
   }
+
   return null;
 }
 
@@ -588,11 +653,17 @@ async function resolveSubscriptionForDisplay(token, s, cache) {
   const remaining = computeRemainingLessons(merged);
   let groupTitle = pickGroupTitle(merged);
   let classObj = null;
+  let monthlyWorkoffCount = null;
 
   for (const cid of collectClassIds(merged)) {
-    classObj = await fetchClassById(token, cid, cache);
-    if (classObj) {
-      if (!groupTitle && classObj.name) groupTitle = String(classObj.name).trim();
+    const cls = await fetchClassById(token, cid, cache);
+    if (!cls) continue;
+    if (!classObj) classObj = cls;
+    if (!groupTitle && cls.name) groupTitle = String(cls.name).trim();
+    const count = pickMonthlyWorkoffCount(cls);
+    if (count != null) {
+      monthlyWorkoffCount = count;
+      classObj = cls;
       break;
     }
   }
@@ -623,13 +694,22 @@ async function resolveSubscriptionForDisplay(token, s, cache) {
     lessonDays = resolveLessonDaysText(classObj, courseObj);
   }
 
+  if (monthlyWorkoffCount == null) {
+    monthlyWorkoffCount = await resolveMonthlyWorkoffCount(
+      token,
+      merged,
+      classObj,
+      cache
+    );
+  }
+
   return {
     merged,
     remaining,
     groupTitle: groupTitle || "—",
     teacher: teacher || "—",
     lessonDays: lessonDays || "—",
-    monthlyWorkoffCount: pickMonthlyWorkoffCount(classObj)
+    monthlyWorkoffCount
   };
 }
 
@@ -821,7 +901,9 @@ function appendSubscriptionBlock(
   out += `📌 Абонемент\n`;
   out += `Преподаватель: ${teacher}\n`;
   out += `Дни занятий группы: ${lessonDays}\n`;
-  out += `Кол-во отработок в месяц: ${monthlyWorkoffCount ?? "—"}\n`;
+  out += `Кол-во отработок в месяц: ${
+    monthlyWorkoffCount == null ? "—" : monthlyWorkoffCount
+  }\n`;
   out += `${formatRemainingLessons(remaining)}\n`;
   out += `Абонемент действует до: ${until}\n\n`;
   out += `⏰ Если вам нужно напоминание об окончании Абонемента, выберите удобное время ниже что бы мы могли вам прислать уведомление\n`;
