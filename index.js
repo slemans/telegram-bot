@@ -989,7 +989,7 @@ function appendSubscriptionBlock(
   out += `📌 Абонемент\n`;
   out += `Преподаватель: ${teacher}\n`;
   out += `Дни занятий группы: ${lessonDays}\n`;
-  out += `Кол-во отработок в месяц: ${monthlyWorkoffLabel ?? "—"}\n`;
+  out += `Кол-во отработок: ${monthlyWorkoffLabel ?? "—"}\n`;
   out += `${formatRemainingLessons(remaining)}\n`;
   out += `Абонемент действует до: ${until}\n\n`;
   out += `⏰ Если вам нужно напоминание об окончании Абонемента, выберите удобное время ниже что бы мы могли вам прислать уведомление\n`;
