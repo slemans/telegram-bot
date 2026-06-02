@@ -200,7 +200,7 @@ async function fetchClassById(token, classId, cache) {
   if (cache.has(cacheKey)) return cache.get(cacheKey);
 
   const headers = { "x-access-token": token };
-  const descQs = "includeDescription=true";
+  const descQs = "includeDescription=true&includeAttributes=true";
 
   const byPath = `https://api.moyklass.com/v1/company/classes/${encodeURIComponent(classId)}?${descQs}`;
   let r = await fetch(byPath, { headers });
@@ -324,6 +324,30 @@ function pickMonthlyWorkoffCount(classObj) {
   const nested = classObj.workOff?.maxWorkOffCount;
   if (nested != null && nested !== "" && !Number.isNaN(Number(nested))) {
     return Math.max(0, Math.floor(Number(nested)));
+  }
+
+  // Часто хранится как признак группы (attributes) в МойКласс.
+  if (Array.isArray(classObj.attributes)) {
+    for (const attr of classObj.attributes) {
+      const key = `${attr?.attributeName ?? ""} ${attr?.attributeAlias ?? ""}`.toLowerCase();
+      if (!/отработ|work.?off|make.?up/.test(key)) continue;
+      if (!/месяц|month/.test(key)) continue;
+
+      const value = attr?.value ?? attr?.valueId;
+      if (value != null && value !== "" && !Number.isNaN(Number(value))) {
+        return Math.max(0, Math.floor(Number(value)));
+      }
+    }
+  }
+
+  // Дополнительный fallback по "плоским" ключам в объекте группы.
+  for (const [k, v] of Object.entries(classObj)) {
+    const key = String(k).toLowerCase();
+    if (!/отработ|work.?off|make.?up/.test(key)) continue;
+    if (!/месяц|month/.test(key)) continue;
+    if (v != null && v !== "" && !Number.isNaN(Number(v))) {
+      return Math.max(0, Math.floor(Number(v)));
+    }
   }
   return null;
 }
