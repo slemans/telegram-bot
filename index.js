@@ -326,6 +326,15 @@ function pickMonthlyWorkoffCount(classObj) {
     return Math.max(0, Math.floor(Number(nested)));
   }
 
+  const nestedParams = classObj.params?.workOff?.maxWorkOffCount;
+  if (
+    nestedParams != null &&
+    nestedParams !== "" &&
+    !Number.isNaN(Number(nestedParams))
+  ) {
+    return Math.max(0, Math.floor(Number(nestedParams)));
+  }
+
   // Часто хранится как признак группы (attributes) в МойКласс.
   if (Array.isArray(classObj.attributes)) {
     for (const attr of classObj.attributes) {
