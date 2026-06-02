@@ -240,14 +240,35 @@ function findClassInCourse(course, classId) {
   return course.classes.find((c) => c && String(c.id) === wanted) ?? null;
 }
 
+/** Догружаем workOff, если в «расширенном» ответе группы его нет. */
+async function mergeClassWorkOffFromBareGet(token, classId, cls) {
+  if (!cls || pickMonthlyWorkoffCount(cls) != null) return cls;
+
+  const url = `https://api.moyklass.com/v1/company/classes/${encodeURIComponent(classId)}`;
+  const r = await fetch(url, { headers: { "x-access-token": token } });
+  if (!r.ok) return cls;
+
+  const extra = normalizeClassFromRaw(await r.json().catch(() => null));
+  return extra ? mergeWorkOffFields({ ...cls }, extra) : cls;
+}
+
 /** Группа: GET /v1/company/classes/{id}?includeDescription=true */
 async function fetchClassById(token, classId, cache) {
   if (classId == null || classId === "") return null;
   const n = Number(classId);
   if (Number.isFinite(n) && n <= 0) return null;
 
-  const cacheKey = `classObj:${classId}`;
-  if (cache.has(cacheKey)) return cache.get(cacheKey);
+  const cacheKey = `classObj:v2:${classId}`;
+  if (cache.has(cacheKey)) {
+    const cached = cache.get(cacheKey);
+    if (cached && pickMonthlyWorkoffCount(cached) != null) return cached;
+    if (cached) {
+      const enriched = await mergeClassWorkOffFromBareGet(token, classId, cached);
+      cache.set(cacheKey, enriched);
+      return enriched;
+    }
+    return null;
+  }
 
   const headers = { "x-access-token": token };
   const descQs = "includeDescription=true&includeAttributes=true";
@@ -262,6 +283,8 @@ async function fetchClassById(token, classId, cache) {
     r = await fetch(byQuery, { headers });
     if (r.ok) cls = normalizeClassFromRaw(await r.json().catch(() => null));
   }
+
+  if (cls) cls = await mergeClassWorkOffFromBareGet(token, classId, cls);
 
   cache.set(cacheKey, cls ?? null);
   return cls;
@@ -421,6 +444,12 @@ async function resolveMonthlyWorkoffCount(token, merged, classObj, cache) {
       const n = pickMonthlyWorkoffCount(clsFromCourse);
       if (n != null) return n;
     }
+    if (!classIds.length && Array.isArray(course?.classes)) {
+      for (const clsFromCourse of course.classes) {
+        const n = pickMonthlyWorkoffCount(clsFromCourse);
+        if (n != null) return n;
+      }
+    }
   }
 
   return null;
@@ -476,8 +505,17 @@ function collectClassIds(merged) {
     out.push(id);
   };
   add(merged.mainClassId ?? merged.main_class_id);
+  add(merged.classId ?? merged.class_id);
+  add(merged.lessonClassId ?? merged.lesson_class_id);
+  if (merged.lessonClass?.id != null) add(merged.lessonClass.id);
+  if (merged.class?.id != null) add(merged.class.id);
   if (Array.isArray(merged.classIds)) {
     for (const cid of merged.classIds) add(cid);
+  }
+  if (Array.isArray(merged.groups)) {
+    for (const g of merged.groups) {
+      if (g && typeof g === "object") add(g.id ?? g.classId);
+    }
   }
   return out;
 }
