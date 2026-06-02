@@ -418,13 +418,46 @@ function getWorkOffSettings(classObj) {
   return wo && typeof wo === "object" ? wo : null;
 }
 
+/** Размер абонемента в занятиях (visitCount в карточке userSubscription). */
+function pickSubscriptionPackageVisits(subscription) {
+  if (!subscription || typeof subscription !== "object") return null;
+  const candidates = [
+    subscription.visitCount,
+    subscription.visitsCount,
+    subscription.lessonsCount,
+    subscription.lessonsInSubscription,
+    subscription.subscription?.visitCount
+  ];
+  for (const v of candidates) {
+    const n = normalizeMonthlyWorkoffValue(v);
+    if (n != null && n > 0) return n;
+  }
+  return null;
+}
+
+/**
+ * Лимит отработок с учётом объёма абонемента:
+ * 4 занятия → 1; 8+ → как в настройках группы (maxWorkOffCount).
+ */
+function adjustWorkoffCountForPackage(apiCount, packageVisits) {
+  if (apiCount == null) return null;
+  if (packageVisits == null) return apiCount;
+  if (packageVisits <= 4) return 1;
+  return apiCount;
+}
+
 /** Число в месяц, «без ограничения» или «—», если в API нет данных. */
-function formatMonthlyWorkoffLabel(classObj) {
-  const n = pickMonthlyWorkoffCount(classObj);
+function formatMonthlyWorkoffLabel(classObj, subscription = null) {
+  const packageVisits = pickSubscriptionPackageVisits(subscription);
+  const raw = pickMonthlyWorkoffCount(classObj);
+  const n =
+    raw != null ? adjustWorkoffCountForPackage(raw, packageVisits) : null;
   if (n != null) return String(n);
 
   const wo = getWorkOffSettings(classObj);
-  if (wo && wo.limitWorkOffCount === false) return "Нет данных, обратитесь к администратору";
+  if (wo && wo.limitWorkOffCount === false) {
+    return "Нет данных, обратитесь к администратору";
+  }
 
   return "—";
 }
@@ -434,13 +467,13 @@ async function resolveMonthlyWorkoffLabel(token, merged, classObj, cache) {
   const sources = [classObj, merged?.lessonClass, merged?.class, merged?.group];
 
   for (const src of sources) {
-    const label = formatMonthlyWorkoffLabel(src);
+    const label = formatMonthlyWorkoffLabel(src, merged);
     if (label !== "—") return label;
   }
 
   for (const cid of classIds) {
     const cls = await fetchClassById(token, cid, cache);
-    const label = formatMonthlyWorkoffLabel(cls);
+    const label = formatMonthlyWorkoffLabel(cls, merged);
     if (label !== "—") return label;
   }
 
@@ -458,12 +491,12 @@ async function resolveMonthlyWorkoffLabel(token, merged, classObj, cache) {
     });
     for (const cid of classIds) {
       const clsFromCourse = findClassInCourse(course, cid);
-      const label = formatMonthlyWorkoffLabel(clsFromCourse);
+      const label = formatMonthlyWorkoffLabel(clsFromCourse, merged);
       if (label !== "—") return label;
     }
     if (!classIds.length && Array.isArray(course?.classes)) {
       for (const clsFromCourse of course.classes) {
-        const label = formatMonthlyWorkoffLabel(clsFromCourse);
+        const label = formatMonthlyWorkoffLabel(clsFromCourse, merged);
         if (label !== "—") return label;
       }
     }
@@ -715,7 +748,7 @@ async function resolveSubscriptionForDisplay(token, s, cache) {
     if (!cls) continue;
     if (!classObj) classObj = cls;
     if (!groupTitle && cls.name) groupTitle = String(cls.name).trim();
-    const label = formatMonthlyWorkoffLabel(cls);
+    const label = formatMonthlyWorkoffLabel(cls, merged);
     if (label !== "—") {
       monthlyWorkoffLabel = label;
       classObj = cls;
