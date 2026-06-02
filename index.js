@@ -307,6 +307,27 @@ function resolveLessonDaysText(classObj, courseObj) {
   return pickTextField(classObj, ["comment"]);
 }
 
+function pickMonthlyWorkoffCount(classObj) {
+  if (!classObj || typeof classObj !== "object") return null;
+
+  const direct = [
+    classObj.workOffCountPerMonth,
+    classObj.monthWorkOffCount,
+    classObj.maxWorkOffCountPerMonth
+  ];
+  for (const v of direct) {
+    if (v != null && v !== "" && !Number.isNaN(Number(v))) {
+      return Math.max(0, Math.floor(Number(v)));
+    }
+  }
+
+  const nested = classObj.workOff?.maxWorkOffCount;
+  if (nested != null && nested !== "" && !Number.isNaN(Number(nested))) {
+    return Math.max(0, Math.floor(Number(nested)));
+  }
+  return null;
+}
+
 function parseSubscriptionCatalogPayload(d) {
   if (d == null) return null;
   const sub = d.subscription ?? d.data ?? d;
@@ -574,7 +595,8 @@ async function resolveSubscriptionForDisplay(token, s, cache) {
     remaining,
     groupTitle: groupTitle || "—",
     teacher: teacher || "—",
-    lessonDays: lessonDays || "—"
+    lessonDays: lessonDays || "—",
+    monthlyWorkoffCount: pickMonthlyWorkoffCount(classObj)
   };
 }
 
@@ -586,16 +608,14 @@ const RULE_VISITS_MENU_TEXT =
 const LEGACY_HELP_MENU_TEXT = "/help помощь";
 const CONTACT_SHARE_LABEL = "📞 Поделится моим номером телефона";
 
-function mainMenuKeyboard() {
-  return {
-    keyboard: [
-      [{ text: SUBSCRIPTIONS_MENU_TEXT }],
-      [{ text: RULE_STUDIO_MENU_TEXT }],
-      [{ text: RULE_VISITS_MENU_TEXT }],
-      [{ text: HELP_MENU_TEXT }]
-    ],
-    resize_keyboard: true
-  };
+function mainMenuKeyboard(showRulesButtons = false) {
+  const keyboard = [[{ text: SUBSCRIPTIONS_MENU_TEXT }]];
+  if (showRulesButtons) {
+    keyboard.push([{ text: RULE_STUDIO_MENU_TEXT }]);
+    keyboard.push([{ text: RULE_VISITS_MENU_TEXT }]);
+  }
+  keyboard.push([{ text: HELP_MENU_TEXT }]);
+  return { keyboard, resize_keyboard: true };
 }
 
 function sharePhoneInlineReplyMarkup() {
@@ -608,15 +628,15 @@ function sharePhoneInlineReplyMarkup() {
 
 /** Нижнее меню + inline-кнопка контакта (как у напоминаний). */
 async function promptPhoneCollection(chatId, bodyText) {
-  await send(chatId, bodyText, { reply_markup: mainMenuKeyboard() });
+  await send(chatId, bodyText, { reply_markup: mainMenuKeyboard(false) });
   await send(chatId, "📞 Нажмите кнопку ниже:", {
     reply_markup: sharePhoneInlineReplyMarkup()
   });
 }
 
 /** Восстановить нижнее меню после одноразовой клавиатуры контакта или inline-only. */
-async function ensureMainMenu(chatId) {
-  await send(chatId, "\u2060", { reply_markup: mainMenuKeyboard() });
+async function ensureMainMenu(chatId, showRulesButtons = false) {
+  await send(chatId, "\u2060", { reply_markup: mainMenuKeyboard(showRulesButtons) });
 }
 
 function isPhoneLikeText(value) {
@@ -760,11 +780,15 @@ async function setSubscriptionNotify(chatId, subId, { enabled, hour }) {
   return { ok: true };
 }
 
-function appendSubscriptionBlock(text, { teacher, lessonDays, remaining, until }) {
+function appendSubscriptionBlock(
+  text,
+  { teacher, lessonDays, remaining, until, monthlyWorkoffCount }
+) {
   let out = text;
   out += `📌 Абонемент\n`;
   out += `Преподаватель: ${teacher}\n`;
   out += `Дни занятий группы: ${lessonDays}\n`;
+  out += `Кол-во отработок в месяц: ${monthlyWorkoffCount ?? "—"}\n`;
   out += `${formatRemainingLessons(remaining)}\n`;
   out += `Абонемент действует до: ${until}\n\n`;
   out += `⏰ Если вам нужно напоминание об окончании Абонемента, выберите удобное время ниже что бы мы могли вам прислать уведомление\n`;
@@ -778,6 +802,34 @@ function notifyTimeButtons(subIdStr) {
     { text: "🌙 20:00", callback_data: `t_${subIdStr}_20` },
     { text: "🔕 Выкл", callback_data: `n_${subIdStr}_off` }
   ];
+}
+
+function hasActiveRowsInSubscriptions(rows, now = new Date()) {
+  if (!Array.isArray(rows) || rows.length === 0) return false;
+  return rows.some((r) => {
+    if (!r) return false;
+    if (r.active === false) return false;
+    if (!r.end_date) return true;
+    return daysUntilEndDateMinsk(r.end_date, now) > 0;
+  });
+}
+
+async function hasActiveSubscriptionsForChat(chatId) {
+  const phone = await getStoredPhoneForChat(chatId);
+  if (phone) {
+    const user = await findUser(phone);
+    if (user) {
+      const subs = await getSubs(user.id);
+      if (Array.isArray(subs) && subs.length > 0) return true;
+    }
+  }
+
+  const { data: subsRows, error } = await supabase
+    .from("subscriptions")
+    .select("active, end_date")
+    .eq("chat_id", chatId);
+  dbLogError("subscriptions select active by chat", error);
+  return hasActiveRowsInSubscriptions(subsRows);
 }
 
 /** Показать абонементы по id из Supabase (если users не сохранился, но subscriptions есть). */
@@ -794,7 +846,7 @@ async function sendSubscriptionsFromStoredIds(chatId, externalIds) {
     if (!detail) continue;
 
     const source = { id: subIdStr, ...detail };
-    const { merged, remaining, teacher, lessonDays } =
+    const { merged, remaining, teacher, lessonDays, monthlyWorkoffCount } =
       await resolveSubscriptionForDisplay(token, source, nameCache);
     const endRaw = subscriptionEndDate(merged);
     if (!endRaw) continue;
@@ -812,7 +864,8 @@ async function sendSubscriptionsFromStoredIds(chatId, externalIds) {
       teacher,
       lessonDays,
       remaining,
-      until
+      until,
+      monthlyWorkoffCount
     });
     buttons.push(notifyTimeButtons(subIdStr));
     await upsertSubscriptionRow(chatId, source, nameCache);
@@ -826,6 +879,7 @@ async function sendSubscriptionsFromStoredIds(chatId, externalIds) {
   await send(chatId, header + text, {
     reply_markup: { inline_keyboard: buttons }
   });
+  await ensureMainMenu(chatId, true);
   return true;
 }
 
@@ -835,7 +889,7 @@ async function sendSubscriptionsByPhone(chatId, phoneDigits, opts = {}) {
 
   if (!user) {
     await send(chatId, "❌ Пользователь не найден", {
-      reply_markup: mainMenuKeyboard()
+      reply_markup: mainMenuKeyboard(false)
     });
     return;
   }
@@ -845,7 +899,7 @@ async function sendSubscriptionsByPhone(chatId, phoneDigits, opts = {}) {
   const subs = await getSubs(user.id);
   if (!subs.length) {
     await send(chatId, "❌ Нет активных абонементов", {
-      reply_markup: mainMenuKeyboard()
+      reply_markup: mainMenuKeyboard(false)
     });
     return;
   }
@@ -857,7 +911,7 @@ async function sendSubscriptionsByPhone(chatId, phoneDigits, opts = {}) {
   const buttons = [];
 
   for (const s of subs) {
-    const { merged, remaining, teacher, lessonDays } =
+    const { merged, remaining, teacher, lessonDays, monthlyWorkoffCount } =
       await resolveSubscriptionForDisplay(token, s, nameCache);
 
     const endRaw = subscriptionEndDate(merged);
@@ -867,7 +921,8 @@ async function sendSubscriptionsByPhone(chatId, phoneDigits, opts = {}) {
       teacher,
       lessonDays,
       remaining,
-      until
+      until,
+      monthlyWorkoffCount
     });
 
     const subIdStr = String(s.id);
@@ -878,9 +933,7 @@ async function sendSubscriptionsByPhone(chatId, phoneDigits, opts = {}) {
   await send(chatId, text, {
     reply_markup: { inline_keyboard: buttons }
   });
-  if (opts.restoreMainMenu) {
-    await ensureMainMenu(chatId);
-  }
+  await ensureMainMenu(chatId, true);
 }
 
 /** «Абонементы»: телефон из users или уже сохранённые subscriptions. */
@@ -930,6 +983,16 @@ async function fetchRulesConfig() {
 }
 
 async function sendRuleMessage(chatId, field) {
+  const allowed = await hasActiveSubscriptionsForChat(chatId);
+  if (!allowed) {
+    await send(
+      chatId,
+      "ℹ️ Раздел с правилами доступен только пользователям с действующим абонементом.",
+      { reply_markup: mainMenuKeyboard(false) }
+    );
+    return;
+  }
+
   const row = await fetchRulesConfig();
   const text =
     field === "studio"
@@ -940,12 +1003,12 @@ async function sendRuleMessage(chatId, field) {
     await send(
       chatId,
       "⚠️ Текст правил пока не добавлен в базу. Обратитесь к администратору.",
-      { reply_markup: mainMenuKeyboard() }
+      { reply_markup: mainMenuKeyboard(true) }
     );
     return;
   }
 
-  await send(chatId, text, { reply_markup: mainMenuKeyboard() });
+  await send(chatId, text, { reply_markup: mainMenuKeyboard(true) });
 }
 
 // ================= HELP (SUPABASE) =================
@@ -1112,10 +1175,19 @@ app.post("/webhook", async (req, res) => {
 
   // ================= START =================
   if (isTelegramCommand(msg.text, "start")) {
-    await promptPhoneCollection(
-      chatId,
-      "📲 Отправьте ваш номер телефона, что бы мы смогли вас найти"
-    );
+    const hasActive = await hasActiveSubscriptionsForChat(chatId);
+    if (hasActive) {
+      await send(
+        chatId,
+        "✅ У вас есть действующий абонемент. Выберите нужный раздел в меню.",
+        { reply_markup: mainMenuKeyboard(true) }
+      );
+    } else {
+      await promptPhoneCollection(
+        chatId,
+        "📲 Отправьте ваш номер телефона, что бы мы смогли вас найти"
+      );
+    }
     return;
   }
 
@@ -1125,12 +1197,13 @@ app.post("/webhook", async (req, res) => {
     msg.text === LEGACY_HELP_MENU_TEXT ||
     isTelegramCommand(msg.text, "help")
   ) {
+    const showRules = await hasActiveSubscriptionsForChat(chatId);
     const helpRowId = await createHelpRequest(chatId);
     if (helpRowId == null) {
       await send(
         chatId,
         "⚠️ Не удалось создать обращение в базе (проверьте таблицу help_requests и политики RLS в Supabase). Напишите администратору или попробуйте позже.",
-        { reply_markup: mainMenuKeyboard() }
+        { reply_markup: mainMenuKeyboard(showRules) }
       );
       return;
     }
@@ -1138,7 +1211,7 @@ app.post("/webhook", async (req, res) => {
       chatId,
       "Если у вас возникли проблемы — напишите, что случилось, и мы вам поможем.",
       {
-        reply_markup: mainMenuKeyboard()
+        reply_markup: mainMenuKeyboard(showRules)
       }
     );
     return;
@@ -1169,7 +1242,7 @@ app.post("/webhook", async (req, res) => {
           chatId,
           "✅ Спасибо! Сообщение принято. Мы свяжемся с вами в ближайшее время.",
           {
-            reply_markup: mainMenuKeyboard()
+            reply_markup: mainMenuKeyboard(await hasActiveSubscriptionsForChat(chatId))
           }
         );
       } else {
@@ -1177,7 +1250,7 @@ app.post("/webhook", async (req, res) => {
           chatId,
           "⚠️ Не удалось сохранить обращение. Попробуйте ещё раз или напишите администратору.",
           {
-            reply_markup: mainMenuKeyboard()
+            reply_markup: mainMenuKeyboard(await hasActiveSubscriptionsForChat(chatId))
           }
         );
       }
