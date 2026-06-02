@@ -412,19 +412,36 @@ function pickMonthlyWorkoffCount(classObj) {
   return null;
 }
 
-async function resolveMonthlyWorkoffCount(token, merged, classObj, cache) {
+function getWorkOffSettings(classObj) {
+  if (!classObj || typeof classObj !== "object") return null;
+  const wo = classObj.params?.workOff ?? classObj.workOff;
+  return wo && typeof wo === "object" ? wo : null;
+}
+
+/** Число в месяц, «без ограничения» или «—», если в API нет данных. */
+function formatMonthlyWorkoffLabel(classObj) {
+  const n = pickMonthlyWorkoffCount(classObj);
+  if (n != null) return String(n);
+
+  const wo = getWorkOffSettings(classObj);
+  if (wo && wo.limitWorkOffCount === false) return "без ограничения";
+
+  return "—";
+}
+
+async function resolveMonthlyWorkoffLabel(token, merged, classObj, cache) {
   const classIds = collectClassIds(merged);
   const sources = [classObj, merged?.lessonClass, merged?.class, merged?.group];
 
   for (const src of sources) {
-    const n = pickMonthlyWorkoffCount(src);
-    if (n != null) return n;
+    const label = formatMonthlyWorkoffLabel(src);
+    if (label !== "—") return label;
   }
 
   for (const cid of classIds) {
     const cls = await fetchClassById(token, cid, cache);
-    const n = pickMonthlyWorkoffCount(cls);
-    if (n != null) return n;
+    const label = formatMonthlyWorkoffLabel(cls);
+    if (label !== "—") return label;
   }
 
   const courseIds = new Set();
@@ -441,18 +458,18 @@ async function resolveMonthlyWorkoffCount(token, merged, classObj, cache) {
     });
     for (const cid of classIds) {
       const clsFromCourse = findClassInCourse(course, cid);
-      const n = pickMonthlyWorkoffCount(clsFromCourse);
-      if (n != null) return n;
+      const label = formatMonthlyWorkoffLabel(clsFromCourse);
+      if (label !== "—") return label;
     }
     if (!classIds.length && Array.isArray(course?.classes)) {
       for (const clsFromCourse of course.classes) {
-        const n = pickMonthlyWorkoffCount(clsFromCourse);
-        if (n != null) return n;
+        const label = formatMonthlyWorkoffLabel(clsFromCourse);
+        if (label !== "—") return label;
       }
     }
   }
 
-  return null;
+  return "—";
 }
 
 function parseSubscriptionCatalogPayload(d) {
@@ -691,16 +708,16 @@ async function resolveSubscriptionForDisplay(token, s, cache) {
   const remaining = computeRemainingLessons(merged);
   let groupTitle = pickGroupTitle(merged);
   let classObj = null;
-  let monthlyWorkoffCount = null;
+  let monthlyWorkoffLabel = "—";
 
   for (const cid of collectClassIds(merged)) {
     const cls = await fetchClassById(token, cid, cache);
     if (!cls) continue;
     if (!classObj) classObj = cls;
     if (!groupTitle && cls.name) groupTitle = String(cls.name).trim();
-    const count = pickMonthlyWorkoffCount(cls);
-    if (count != null) {
-      monthlyWorkoffCount = count;
+    const label = formatMonthlyWorkoffLabel(cls);
+    if (label !== "—") {
+      monthlyWorkoffLabel = label;
       classObj = cls;
       break;
     }
@@ -732,8 +749,8 @@ async function resolveSubscriptionForDisplay(token, s, cache) {
     lessonDays = resolveLessonDaysText(classObj, courseObj);
   }
 
-  if (monthlyWorkoffCount == null) {
-    monthlyWorkoffCount = await resolveMonthlyWorkoffCount(
+  if (monthlyWorkoffLabel === "—") {
+    monthlyWorkoffLabel = await resolveMonthlyWorkoffLabel(
       token,
       merged,
       classObj,
@@ -747,7 +764,7 @@ async function resolveSubscriptionForDisplay(token, s, cache) {
     groupTitle: groupTitle || "—",
     teacher: teacher || "—",
     lessonDays: lessonDays || "—",
-    monthlyWorkoffCount
+    monthlyWorkoffLabel
   };
 }
 
@@ -933,15 +950,13 @@ async function setSubscriptionNotify(chatId, subId, { enabled, hour }) {
 
 function appendSubscriptionBlock(
   text,
-  { teacher, lessonDays, remaining, until, monthlyWorkoffCount }
+  { teacher, lessonDays, remaining, until, monthlyWorkoffLabel }
 ) {
   let out = text;
   out += `📌 Абонемент\n`;
   out += `Преподаватель: ${teacher}\n`;
   out += `Дни занятий группы: ${lessonDays}\n`;
-  out += `Кол-во отработок в месяц: ${
-    monthlyWorkoffCount == null ? "—" : monthlyWorkoffCount
-  }\n`;
+  out += `Кол-во отработок в месяц: ${monthlyWorkoffLabel ?? "—"}\n`;
   out += `${formatRemainingLessons(remaining)}\n`;
   out += `Абонемент действует до: ${until}\n\n`;
   out += `⏰ Если вам нужно напоминание об окончании Абонемента, выберите удобное время ниже что бы мы могли вам прислать уведомление\n`;
@@ -999,7 +1014,7 @@ async function sendSubscriptionsFromStoredIds(chatId, externalIds) {
     if (!detail) continue;
 
     const source = { id: subIdStr, ...detail };
-    const { merged, remaining, teacher, lessonDays, monthlyWorkoffCount } =
+    const { merged, remaining, teacher, lessonDays, monthlyWorkoffLabel } =
       await resolveSubscriptionForDisplay(token, source, nameCache);
     const endRaw = subscriptionEndDate(merged);
     if (!endRaw) continue;
@@ -1018,7 +1033,7 @@ async function sendSubscriptionsFromStoredIds(chatId, externalIds) {
       lessonDays,
       remaining,
       until,
-      monthlyWorkoffCount
+      monthlyWorkoffLabel
     });
     buttons.push(notifyTimeButtons(subIdStr));
     await upsertSubscriptionRow(chatId, source, nameCache);
@@ -1064,7 +1079,7 @@ async function sendSubscriptionsByPhone(chatId, phoneDigits, opts = {}) {
   const buttons = [];
 
   for (const s of subs) {
-    const { merged, remaining, teacher, lessonDays, monthlyWorkoffCount } =
+    const { merged, remaining, teacher, lessonDays, monthlyWorkoffLabel } =
       await resolveSubscriptionForDisplay(token, s, nameCache);
 
     const endRaw = subscriptionEndDate(merged);
@@ -1075,7 +1090,7 @@ async function sendSubscriptionsByPhone(chatId, phoneDigits, opts = {}) {
       lessonDays,
       remaining,
       until,
-      monthlyWorkoffCount
+      monthlyWorkoffLabel
     });
 
     const subIdStr = String(s.id);
